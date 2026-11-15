@@ -56,7 +56,7 @@ wait_for_log() {
   local elapsed=0
   while (( elapsed < timeout_seconds )); do
     local count
-    count="$(adb logcat -d -s Browser:I Browser:W Browser:E 2>/dev/null | grep -F -c "$pattern" || true)"
+    count="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F -c "$pattern" || true)"
     if (( count >= expected_count )); then
       return 0
     fi
@@ -82,7 +82,7 @@ wait_for_log "PAGE_VISUAL_STATE_READY" 2 30
 
 adb exec-out screencap -p > "$ARTIFACTS/page-after-renderer-recovery.png"
 
-PAGE_LOG="$(adb logcat -d -s Browser:I Browser:W Browser:E 2>/dev/null)"
+PAGE_LOG="$(adb logcat -d -s Browser:V 2>/dev/null)"
 if ! grep -F "Example Domain" <<<"$PAGE_LOG" >/dev/null; then
   echo "The loaded page did not report the expected Example Domain title." >&2
   exit 1
@@ -134,6 +134,8 @@ report = {
         "page_rendered_after_recovery": "RENDERER_RECOVERY_COMPLETED" in log,
         "app_process_survived": bool(pid),
         "active_webview_provider_logged": "WEBVIEW_PROVIDER" in log,
+        "before_recovery_screenshot_saved": (folder / "page-before-renderer-restart.png").is_file(),
+        "after_recovery_screenshot_saved": (folder / "page-after-renderer-recovery.png").is_file(),
     },
 }
 report["result"] = "PASS" if all(report["checks"].values()) else "FAIL"
