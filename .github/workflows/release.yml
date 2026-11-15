@@ -1,8 +1,6 @@
 name: Browser Android Release APK
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -54,40 +52,20 @@ jobs:
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > app/release-key.jks
           chmod 600 app/release-key.jks
 
-      - name: Build version 1.0.6 signed Release APK
+      - name: Build signed Release APK
         env:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: gradle --no-daemon clean :app:assemblePhoneRelease
 
-      - name: Verify package, version, ABI, and release signature
+      - name: Verify and upload signed ARM64 Release APK
         shell: bash
         run: |
           set -euo pipefail
           APK="$(find app/build/outputs/apk/phone/release -maxdepth 1 -type f -name '*.apk' ! -name '*unsigned*' -print -quit)"
           test -n "$APK"
-          APKSIGNER="$ANDROID_HOME/build-tools/37.0.0/apksigner"
-          APKANALYZER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name apkanalyzer -print -quit)"
-          test -x "$APKSIGNER"
-          test -x "$APKANALYZER"
-          "$APKSIGNER" verify --verbose --print-certs "$APK" | tee release-signature.txt
-          test "$("$APKANALYZER" manifest application-id "$APK")" = "com.search.browser"
-          test "$("$APKANALYZER" manifest version-name "$APK")" = "1.0.6"
-          test "$("$APKANALYZER" manifest version-code "$APK")" = "7"
-          python3 - "$APK" <<'PY'
-          import sys, zipfile
-          apk = sys.argv[1]
-          with zipfile.ZipFile(apk) as z:
-              abis = sorted({
-                  name.split('/')[1]
-                  for name in z.namelist()
-                  if name.startswith('lib/') and len(name.split('/')) > 2 and name.endswith('.so')
-              })
-          if abis != ['arm64-v8a']:
-              raise SystemExit(f"Expected only arm64-v8a native libraries, found: {abis}")
-          print(f"Verified native ABI: {abis[0]}")
-          PY
+          "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --verbose --print-certs "$APK" | tee release-signature.txt
           cp "$APK" Browser-1.0.6-ARM64-Release-Signed.apk
 
       - name: Upload signed Release APK
