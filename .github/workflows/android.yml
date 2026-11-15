@@ -42,24 +42,50 @@ jobs:
           set -euo pipefail
           ANDROID_CLI="$ANDROID_HOME/cmdline-tools/22.0/bin/android"
           test -x "$ANDROID_CLI"
-          python3 -c "from pathlib import Path; import os; Path(os.environ['RUNNER_TEMP'] + '/android-sdk-licenses.txt').write_text('y\n' * 1000)"
+          python3 -c "from pathlib import Path; import os; Path(os.environ['RUNNER_TEMP'] + '/android-sdk-licenses.txt').write_text('y\\n' * 1000)"
           "$ANDROID_CLI" --no-metrics sdk install --canary "platforms;android-37.0" "build-tools;37.0.0" platform-tools < "$RUNNER_TEMP/android-sdk-licenses.txt"
 
       - name: Run tests and build APKs
         run: gradle --no-daemon clean testDebugUnitTest assembleDebug assembleRelease
 
-      - name: Upload installable debug APK
+      - name: Verify ARM64-only APKs
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from zipfile import ZipFile
+
+          apks = [
+              "app/build/outputs/apk/debug/app-debug.apk",
+              "app/build/outputs/apk/release/app-release-unsigned.apk",
+          ]
+          for apk in apks:
+              with ZipFile(apk) as archive:
+                  abis = sorted({
+                      path.split("/")[1]
+                      for path in archive.namelist()
+                      if path.startswith("lib/")
+                      and len(path.split("/")) > 2
+                      and path.endswith(".so")
+                  })
+              if abis != ["arm64-v8a"]:
+                  raise SystemExit(
+                      f"{apk}: expected only arm64-v8a native libraries, found {abis}"
+                  )
+              print(f"{apk}: verified arm64-v8a only")
+          PY
+
+      - name: Upload installable debug ARM64 APK
         uses: actions/upload-artifact@v7
         with:
-          name: Browser-debug-APK
+          name: Browser-debug-APK-arm64-v8a
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload unsigned release APK
+      - name: Upload unsigned release ARM64 APK
         uses: actions/upload-artifact@v7
         with:
-          name: Browser-release-APK-unsigned
+          name: Browser-release-APK-arm64-v8a-unsigned
           path: app/build/outputs/apk/release/app-release-unsigned.apk
           if-no-files-found: warn
           retention-days: 14
