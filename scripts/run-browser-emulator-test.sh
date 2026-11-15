@@ -73,13 +73,14 @@ wait_for_log() {
 
 wait_for_log "PAGE_DOM_READY" 1 90
 wait_for_log "PAGE_VISUAL_STATE_READY" 1 30
+sleep 2
 adb exec-out screencap -p > "$ARTIFACTS/page-before-renderer-restart.png"
 
 wait_for_log "RENDERER_GONE" 1 30
 wait_for_log "RENDERER_RECOVERY_STARTED" 1 30
 wait_for_log "RENDERER_RECOVERY_COMPLETED" 1 60
 wait_for_log "PAGE_VISUAL_STATE_READY" 2 30
-
+sleep 2
 adb exec-out screencap -p > "$ARTIFACTS/page-after-renderer-recovery.png"
 
 PAGE_LOG="$(adb logcat -d -s Browser:V 2>/dev/null)"
@@ -116,15 +117,86 @@ test -s "$ARTIFACTS/page-after-renderer-recovery.png"
 
 python3 - "$EXPECTED_API" "$APP_PID" "$ARTIFACTS" <<'PY'
 import json
+import struct
 import sys
+import zlib
 from pathlib import Path
 
 api, pid, folder = sys.argv[1], sys.argv[2], Path(sys.argv[3])
 log = (folder / "logcat.txt").read_text(errors="replace")
+
+def visible_content_ratio(path: Path) -> float:
+    data = path.read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError(f"Not a PNG screenshot: {path}")
+    pos = 8
+    width = height = bit_depth = color_type = None
+    compressed = bytearray()
+    while pos < len(data):
+        length = struct.unpack(">I", data[pos:pos+4])[0]
+        kind = data[pos+4:pos+8]
+        payload = data[pos+8:pos+8+length]
+        pos += 12 + length
+        if kind == b"IHDR":
+            width, height, bit_depth, color_type, compression, filtering, interlace = struct.unpack(">IIBBBBB", payload)
+        elif kind == b"IDAT":
+            compressed.extend(payload)
+        elif kind == b"IEND":
+            break
+    if bit_depth != 8 or color_type not in (2, 6) or interlace != 0:
+        raise ValueError(f"Unsupported PNG format: depth={bit_depth}, type={color_type}, interlace={interlace}")
+    channels = 3 if color_type == 2 else 4
+    stride = width * channels
+    raw = zlib.decompress(compressed)
+    rows = []
+    offset = 0
+    previous = bytearray(stride)
+    for _ in range(height):
+        filt = raw[offset]
+        scan = bytearray(raw[offset+1:offset+1+stride])
+        offset += stride + 1
+        for i in range(stride):
+            left = scan[i-channels] if i >= channels else 0
+            up = previous[i]
+            upper_left = previous[i-channels] if i >= channels else 0
+            if filt == 1: scan[i] = (scan[i] + left) & 255
+            elif filt == 2: scan[i] = (scan[i] + up) & 255
+            elif filt == 3: scan[i] = (scan[i] + ((left + up)//2)) & 255
+            elif filt == 4:
+                p = left + up - upper_left
+                pa, pb, pc = abs(p-left), abs(p-up), abs(p-upper_left)
+                predictor = left if pa <= pb and pa <= pc else (up if pb <= pc else upper_left)
+                scan[i] = (scan[i] + predictor) & 255
+            elif filt != 0: raise ValueError(f"Unknown PNG filter {filt}")
+        rows.append(scan)
+        previous = scan
+    # Exclude status/navigation bars and count bright pixels in the browser viewport.
+    y0, y1 = height // 10, height * 9 // 10
+    x0, x1 = width // 20, width * 19 // 20
+    bright = total = 0
+    for y in range(y0, y1):
+        row = rows[y]
+        for x in range(x0, x1):
+            i = x * channels
+            r, g, b = row[i], row[i+1], row[i+2]
+            total += 1
+            if max(r, g, b) > 35:
+                bright += 1
+    return bright / max(total, 1)
+
+before = folder / "page-before-renderer-restart.png"
+after = folder / "page-after-renderer-recovery.png"
+ratio_before = visible_content_ratio(before) if before.is_file() else 0.0
+ratio_after = visible_content_ratio(after) if after.is_file() else 0.0
 report = {
     "application_id": "com.search.browser",
     "android_api": int(api),
     "process_id_after_test": pid,
+    "screenshot_metrics": {
+        "before_recovery_visible_pixel_ratio": round(ratio_before, 4),
+        "after_recovery_visible_pixel_ratio": round(ratio_after, 4),
+        "minimum_required_visible_ratio": 0.08
+    },
     "checks": {
         "apk_installed": (folder / "install.txt").exists(),
         "webview_dom_ready": "PAGE_DOM_READY" in log and "Example Domain" in log,
@@ -134,8 +206,9 @@ report = {
         "page_rendered_after_recovery": "RENDERER_RECOVERY_COMPLETED" in log,
         "app_process_survived": bool(pid),
         "active_webview_provider_logged": "WEBVIEW_PROVIDER" in log,
-        "before_recovery_screenshot_saved": (folder / "page-before-renderer-restart.png").is_file(),
-        "after_recovery_screenshot_saved": (folder / "page-after-renderer-recovery.png").is_file(),
+        "before_recovery_screenshot_saved": before.is_file(),
+        "after_recovery_screenshot_saved": after.is_file(),
+        "after_recovery_screenshot_visibly_rendered": ratio_after >= 0.08,
     },
 }
 report["result"] = "PASS" if all(report["checks"].values()) else "FAIL"

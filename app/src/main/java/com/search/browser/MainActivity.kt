@@ -138,6 +138,16 @@ class MainActivity : AppCompatActivity() {
     private fun createBrowserView(): WebView {
         return WebView(this).apply {
             setBackgroundColor(Color.BLACK)
+            if (android.os.Build.VERSION.SDK_INT == android.os.Build.VERSION_CODES.R) {
+                // Android 11 emulator images may ship an old WebView provider whose
+                // hardware compositor reports visual-state readiness but leaves a
+                // black surface. Use software composition on API 30 as a fallback.
+                setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+                Log.w(TAG, "WEBVIEW_RENDERING_MODE=software api=30")
+            } else {
+                setLayerType(View.LAYER_TYPE_HARDWARE, null)
+                Log.i(TAG, "WEBVIEW_RENDERING_MODE=hardware api=${android.os.Build.VERSION.SDK_INT}")
+            }
             isFocusable = true
             isFocusableInTouchMode = true
             overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
