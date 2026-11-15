@@ -1,42 +1,42 @@
-# Browser — GeckoView Android browser
+# Browser — Chromium Android browser
 
-The Browser app uses Mozilla GeckoView as its bundled web-rendering engine. It does not depend on the Android System WebView provider and no longer uses the previous Cefrium integration.
+Browser embeds Chromium through Cefrium 0.20.0. The project uses a native Chromium surface, a dark address bar, Chromium ad blocking, and Cefrium download management.
 
-## Engine and packaged ABIs
+## Rendering engine
 
-- GeckoView stable artifact: 160.0.20261104181552
-- Debug builds bundle the x86_64 GeckoView runtime for GitHub Actions emulators.
-- Release builds bundle the arm64-v8a GeckoView runtime for 64-bit ARM Android phones.
-- Minimum Android API remains 29.
+- Embedded engine: Cefrium 0.20.0
+- Chromium version: 156.0.8078.88
+- Minimum Android API: 29
+- Emulator Debug ABI: x86_64
+- Phone Release ABI: arm64-v8a
 
-The app creates one process-lifetime GeckoRuntime and attaches a GeckoSession to its GeckoView. If GeckoView reports a content-process crash or kill, the app detaches the failed session, creates a replacement, and reloads the last successfully painted URL.
+The app creates its browser with the Cefrium surface API. If Cefrium reports that a renderer terminated, the app closes the failed browser instance and creates a fresh Chromium browser. It reloads the last URL whose surface bitmap passed a visible-pixel check.
 
-The tracking-protection switch controls GeckoView anti-tracking categories and per-session tracking protection. This is browser tracking protection, not an EasyList subscription-based ad filter.
+The black browser UI, address bar, Chromium ad blocking, in-app download list, download pause/resume/cancel actions, and saved download history remain in the app.
 
-## GitHub Actions emulator matrix
+## Build variants
 
-Every run builds a Debug APK and an unsigned Release APK, runs unit tests, then installs the Debug APK into two separate GitHub Actions emulators:
+Every GitHub Actions run builds:
+- `emulatorDebug`: x86_64 Debug APK for the API 30 and API 35 emulator jobs.
+- `phoneRelease`: arm64-v8a unsigned Release APK for 64-bit ARM Android phones.
 
-| Emulator | Image | ABI |
-|---|---|---|
-| Android API 30 | Google APIs, Pixel 5 profile | x86_64 |
-| Android API 35 | Google APIs, Pixel 5 profile | x86_64 |
+The build runs unit tests before creating both APK variants. Release minification remains enabled; Cefrium 0.20.0 supplies consumer rules for the native engine.
 
-KVM is enabled before emulator startup. The original emulator template repository is read-only; all added workflow and test files are maintained in this repository.
+## Emulator verification
 
-## Runtime tests and evidence
+The API 30 and API 35 emulator jobs each install the x86_64 Debug APK, load `https://example.com/`, and verify the page title and loading-state callback. They then call Cefrium's surface-bitmap capture API and record the visible-pixel ratio, before taking a device screenshot.
 
-The runtime test opens https://example.com/, checks the GeckoView engine version, page title, successful page-load callback, and first-contentful-paint callback. It captures a screenshot and checks that the page is visibly rendered.
+A debug-only test navigates to Chromium's renderer-crash test URL. The app must receive Cefrium's renderer-termination callback, close the failed browser, create a replacement, reload Example Domain, and produce another visible surface bitmap. A second device screenshot is checked for black/near-black output. The run fails if recovery does not complete or the app process exits.
 
-The test then exercises the app's GeckoSession replacement path—the same path called by GeckoView onCrash and onKill callbacks—reloads the last successful URL, waits for another first-contentful-paint callback, and checks a second screenshot. The test invokes the recovery handler directly; it does not claim to synthesize a native Gecko content-process crash.
+The forced renderer termination is only enabled in Debug builds. It exercises the same callback and browser-recreation path used for unexpected renderer termination; it does not claim to reproduce every device-specific GPU or driver fault.
 
-Each emulator uploads before/after recovery screenshots, the final screenshot, Logcat, device properties, package/activity/memory dumps, and report.json with page-render and screenshot pixel checks. A black or near-black screenshot fails the test even if the page-load callback fired.
+Each emulator job uploads screenshots, Logcat, package/activity information, and a JSON report.
 
 ## Build artifacts
 
-- Browser-debug-APK: x86_64 Debug APK used in emulator jobs.
-- Browser-release-APK-unsigned: arm64-v8a unsigned Release APK.
-- Browser-unit-test-report: Gradle unit-test report.
-- Browser-emulator-API-30 and Browser-emulator-API-35: screenshots, Logcat, device details, and JSON test reports.
+- `Browser-debug-APK`: x86_64 emulator Debug APK.
+- `Browser-release-APK-unsigned`: arm64-v8a phone Release APK (unsigned).
+- `Browser-unit-test-report`: Gradle unit-test results.
+- `Browser-emulator-API-30-*` and `Browser-emulator-API-35-*`: runtime logs, screenshots, device details, and pixel-verification reports.
 
-The Release APK is unsigned. This workflow does not create a GitHub Release or sign the APK.
+The workflow does not publish a GitHub Release or sign the APK.

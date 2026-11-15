@@ -10,7 +10,6 @@ mkdir -p "$ARTIFACTS"
 
 if [[ ! -f "$APK" ]]; then
   echo "Debug APK was not found at: $APK" >&2
-  echo "Files under the expected download directory:" >&2
   find "$(dirname "$APK")" -maxdepth 3 -type f -print >&2 || true
   exit 1
 fi
@@ -21,6 +20,7 @@ collect_evidence() {
   adb shell getprop > "$ARTIFACTS/device-properties.txt" 2>&1 || true
   adb shell dumpsys package "$PACKAGE" > "$ARTIFACTS/package-dump.txt" 2>&1 || true
   adb shell dumpsys activity activities > "$ARTIFACTS/activity-dump.txt" 2>&1 || true
+  adb shell dumpsys meminfo "$PACKAGE" > "$ARTIFACTS/memory-dump.txt" 2>&1 || true
 }
 trap collect_evidence EXIT
 
@@ -45,7 +45,7 @@ adb shell am force-stop "$PACKAGE"
 
 adb shell am start -W -n "$ACTIVITY" \
   --es com.search.browser.TEST_URL "https://example.com/" \
-  --ez com.search.browser.TEST_RECOVER_SESSION true \
+  --ez com.search.browser.TEST_CRASH_RENDERER true \
   2>&1 | tee "$ARTIFACTS/launch.txt"
 
 wait_for_log() {
@@ -70,33 +70,38 @@ wait_for_log() {
   return 1
 }
 
-wait_for_log "GECKOVIEW_ENGINE version=160.0.20261104181552" 1 90
+wait_for_log "CEF_ENGINE version=0.20.0 chromium=156.0.8078.88" 1 90
 wait_for_log "PAGE_TITLE title=Example Domain" 1 120
-wait_for_log "PAGE_LOAD_COMPLETE url=https://example.com/ success=true" 1 120
-wait_for_log "PAGE_FIRST_CONTENTFUL_PAINT" 1 60
-sleep 2
-adb exec-out screencap -p > "$ARTIFACTS/page-before-session-recovery.png"
+wait_for_log "PAGE_LOAD_STATE loading=false" 1 120
+wait_for_log "PAGE_BITMAP_CAPTURED url=https://example.com/" 1 60
+wait_for_log "TEST_RENDERER_CRASH_ARMED" 1 30
+sleep 1
+adb exec-out screencap -p > "$ARTIFACTS/page-before-renderer-restart.png"
 
-# Exercise the same replacement path used by GeckoView onCrash/onKill callbacks.
-# This test invokes the recovery handler directly; it does not synthesize a native Gecko crash.
-wait_for_log "SESSION_RECOVERY_STARTED reason=emulator-test" 1 90
-wait_for_log "SESSION_RECOVERY_COMPLETED" 1 120
-wait_for_log "PAGE_FIRST_CONTENTFUL_PAINT" 2 90
-sleep 2
-adb exec-out screencap -p > "$ARTIFACTS/page-after-session-recovery.png"
+# Debug-only test: chrome://crash terminates the Chromium renderer. The app process
+# must survive, receive Cefrium's callback, and replace the failed browser instance.
+wait_for_log "CHROMIUM_RENDERER_TERMINATED" 1 60
+wait_for_log "CHROMIUM_RECOVERY_STARTED" 1 30
+wait_for_log "PAGE_TITLE title=Example Domain" 2 120
+wait_for_log "CHROMIUM_RECOVERY_COMPLETED" 1 120
+wait_for_log "PAGE_BITMAP_CAPTURED url=https://example.com/" 2 60
+sleep 1
+adb exec-out screencap -p > "$ARTIFACTS/page-after-renderer-recovery.png"
 
 PAGE_LOG="$(adb logcat -d -s Browser:V 2>/dev/null)"
 for required in \
-  "GECKOVIEW_ENGINE version=160.0.20261104181552" \
+  "CEF_ENGINE version=0.20.0 chromium=156.0.8078.88" \
   "PAGE_TITLE title=Example Domain" \
-  "PAGE_LOAD_COMPLETE url=https://example.com/ success=true" \
-  "SESSION_RECOVERY_STARTED reason=emulator-test" \
-  "SESSION_RECOVERY_COMPLETED"; do
+  "PAGE_LOAD_STATE loading=false" \
+  "CHROMIUM_RENDERER_TERMINATED" \
+  "CHROMIUM_RECOVERY_STARTED" \
+  "CHROMIUM_RECOVERY_COMPLETED"; do
   if ! grep -F "$required" <<<"$PAGE_LOG" >/dev/null; then
     echo "Missing runtime assertion: $required" >&2
     exit 1
   fi
 done
+
 if grep -F "FATAL EXCEPTION" "$ARTIFACTS/logcat.txt" >/dev/null; then
   echo "A fatal application exception was found in Logcat." >&2
   exit 1
@@ -104,21 +109,19 @@ fi
 
 APP_PID="$(adb shell pidof "$PACKAGE" | tr -d '\r')"
 if [[ -z "$APP_PID" ]]; then
-  echo "Browser process did not remain alive after session recovery." >&2
+  echo "Browser process did not remain alive after Chromium renderer recovery." >&2
   exit 1
 fi
 
 adb shell dumpsys activity activities > "$ARTIFACTS/activity-dump-after-test.txt"
 if ! grep -E "mResumedActivity|topResumedActivity" "$ARTIFACTS/activity-dump-after-test.txt" | grep -F "$PACKAGE" >/dev/null; then
-  echo "Browser is not the resumed Activity after session recovery." >&2
+  echo "Browser is not the resumed Activity after renderer recovery." >&2
   exit 1
 fi
 
-# Persist the current logs before the report reads them; the EXIT trap refreshes them again.
 adb logcat -d -v threadtime > "$ARTIFACTS/logcat.txt" 2>&1
-
-test -s "$ARTIFACTS/page-before-session-recovery.png"
-test -s "$ARTIFACTS/page-after-session-recovery.png"
+test -s "$ARTIFACTS/page-before-renderer-restart.png"
+test -s "$ARTIFACTS/page-after-renderer-recovery.png"
 
 python3 - "$EXPECTED_API" "$APP_PID" "$ARTIFACTS" <<'PY'
 import json
@@ -133,7 +136,7 @@ log = (folder / "logcat.txt").read_text(errors="replace")
 def visible_content_ratio(path: Path) -> float:
     data = path.read_bytes()
     if data[:8] != b"\x89PNG\r\n\x1a\n":
-        raise ValueError(f"Not a PNG screenshot: {path}")
+        raise ValueError(f"Not a PNG: {path}")
     pos = 8
     width = height = bit_depth = color_type = None
     compressed = bytearray()
@@ -149,7 +152,7 @@ def visible_content_ratio(path: Path) -> float:
         elif kind == b"IEND":
             break
     if bit_depth != 8 or color_type not in (2, 6) or interlace != 0:
-        raise ValueError(f"Unsupported PNG format: depth={bit_depth}, type={color_type}, interlace={interlace}")
+        raise ValueError(f"Unsupported PNG: depth={bit_depth}, type={color_type}, interlace={interlace}")
     channels = 3 if color_type == 2 else 4
     stride = width * channels
     raw = zlib.decompress(compressed)
@@ -164,58 +167,64 @@ def visible_content_ratio(path: Path) -> float:
             left = scan[i-channels] if i >= channels else 0
             up = previous[i]
             upper_left = previous[i-channels] if i >= channels else 0
-            if filt == 1: scan[i] = (scan[i] + left) & 255
-            elif filt == 2: scan[i] = (scan[i] + up) & 255
-            elif filt == 3: scan[i] = (scan[i] + ((left + up)//2)) & 255
+            if filt == 1:
+                scan[i] = (scan[i] + left) & 255
+            elif filt == 2:
+                scan[i] = (scan[i] + up) & 255
+            elif filt == 3:
+                scan[i] = (scan[i] + ((left + up)//2)) & 255
             elif filt == 4:
                 p = left + up - upper_left
                 pa, pb, pc = abs(p-left), abs(p-up), abs(p-upper_left)
                 predictor = left if pa <= pb and pa <= pc else (up if pb <= pc else upper_left)
                 scan[i] = (scan[i] + predictor) & 255
-            elif filt != 0: raise ValueError(f"Unknown PNG filter {filt}")
+            elif filt != 0:
+                raise ValueError(f"Unknown PNG filter {filt}")
         rows.append(scan)
         previous = scan
-    # Exclude status/navigation bars and count bright pixels in the browser viewport.
+
     y0, y1 = height // 10, height * 9 // 10
     x0, x1 = width // 20, width * 19 // 20
-    bright = total = 0
+    visible = total = 0
     for y in range(y0, y1):
         row = rows[y]
         for x in range(x0, x1):
             i = x * channels
-            r, g, b = row[i], row[i+1], row[i+2]
             total += 1
-            if max(r, g, b) > 35:
-                bright += 1
-    return bright / max(total, 1)
+            if max(row[i], row[i+1], row[i+2]) > 35:
+                visible += 1
+    return visible / max(total, 1)
 
-before = folder / "page-before-session-recovery.png"
-after = folder / "page-after-session-recovery.png"
+before = folder / "page-before-renderer-restart.png"
+after = folder / "page-after-renderer-recovery.png"
 ratio_before = visible_content_ratio(before) if before.is_file() else 0.0
 ratio_after = visible_content_ratio(after) if after.is_file() else 0.0
 report = {
     "application_id": "com.search.browser",
+    "engine": "Chromium via Cefrium",
+    "cefrium_version": "0.20.0",
+    "chromium_version": "156.0.8078.88",
     "android_api": int(api),
     "process_id_after_test": pid,
     "screenshot_metrics": {
         "before_recovery_visible_pixel_ratio": round(ratio_before, 4),
         "after_recovery_visible_pixel_ratio": round(ratio_after, 4),
-        "minimum_required_visible_ratio": 0.08
+        "minimum_required_visible_ratio": 0.08,
     },
     "checks": {
         "apk_installed": (folder / "install.txt").exists(),
-         "page_title_verified": "PAGE_TITLE title=Example Domain" in log,
-        "page_load_succeeded": "PAGE_LOAD_COMPLETE url=https://example.com/ success=true" in log,
-        "first_visual_frame": "PAGE_FIRST_CONTENTFUL_PAINT" in log,
-        "session_recovery_triggered": "SESSION_RECOVERY_STARTED reason=emulator-test" in log,
-        "session_recreated": "SESSION_RECOVERY_STARTED" in log,
-        "content_painted_after_recovery": log.count("PAGE_FIRST_CONTENTFUL_PAINT") >= 2 and "SESSION_RECOVERY_COMPLETED" in log,
+        "cefrium_chromium_engine_logged": "CEF_ENGINE version=0.20.0 chromium=156.0.8078.88" in log,
+        "page_title_verified": "PAGE_TITLE title=Example Domain" in log,
+        "page_load_completed": "PAGE_LOAD_STATE loading=false" in log,
+        "surface_bitmap_captured_before_crash": log.count("PAGE_BITMAP_CAPTURED url=https://example.com/") >= 1,
+        "renderer_termination_callback": "CHROMIUM_RENDERER_TERMINATED" in log,
+        "fresh_browser_created": "CHROMIUM_RECOVERY_STARTED" in log,
+        "page_rendered_after_recovery": "CHROMIUM_RECOVERY_COMPLETED" in log and log.count("PAGE_BITMAP_CAPTURED url=https://example.com/") >= 2,
         "app_process_survived": bool(pid),
-        "geckoview_engine_logged": "GECKOVIEW_ENGINE" in log,
         "before_recovery_screenshot_saved": before.is_file(),
         "after_recovery_screenshot_saved": after.is_file(),
         "before_recovery_screenshot_visibly_rendered": ratio_before >= 0.08,
-    "after_recovery_screenshot_visibly_rendered": ratio_after >= 0.08,
+        "after_recovery_screenshot_visibly_rendered": ratio_after >= 0.08,
     },
 }
 report["result"] = "PASS" if all(report["checks"].values()) else "FAIL"
@@ -225,5 +234,5 @@ if report["result"] != "PASS":
     raise SystemExit(1)
 PY
 
-echo "PASS: API $EXPECTED_API loaded Example Domain, drew a visual frame, recovered from a session recovery, and remained foregrounded." | tee "$ARTIFACTS/result.txt"
-echo "PASS: API $EXPECTED_API - GeckoView page rendering and session recovery." >> "$GITHUB_STEP_SUMMARY"
+echo "PASS: API $EXPECTED_API drew Example Domain with Chromium and recovered after renderer termination." | tee "$ARTIFACTS/result.txt"
+echo "PASS: API $EXPECTED_API - Chromium surface rendering and renderer recovery." >> "$GITHUB_STEP_SUMMARY"

@@ -1,12 +1,10 @@
 plugins {
     id("com.android.application")
+    id("com.cefrium") version "0.20.0"
 }
 
 android {
-    buildFeatures {
-        buildConfig = true
-    }
-
+    buildFeatures { buildConfig = true }
     namespace = "com.search.browser"
     compileSdk = 37
 
@@ -14,9 +12,21 @@ android {
         applicationId = "com.search.browser"
         minSdk = 29
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = 4
+        versionName = "1.0.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    flavorDimensions += "target"
+    productFlavors {
+        create("emulator") {
+            dimension = "target"
+            ndk { abiFilters += listOf("x86_64") }
+        }
+        create("phone") {
+            dimension = "target"
+            ndk { abiFilters += listOf("arm64-v8a") }
+        }
     }
 
     compileOptions {
@@ -24,28 +34,26 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    packaging { jniLibs { useLegacyPackaging = true } }
+
     buildTypes {
         debug { }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
         }
     }
-
     testOptions { unitTests.isReturnDefaultValues = true }
 }
 
 dependencies {
+    implementation("com.cefrium:cefrium-sdk:0.20.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.mediarouter:mediarouter:1.7.0")
     implementation("androidx.core:core:1.16.0")
     implementation("androidx.browser:browser:1.8.0")
-
-    debugImplementation("org.mozilla.geckoview:geckoview-x86_64:160.0.20261104181552")
-    releaseImplementation("org.mozilla.geckoview:geckoview-arm64-v8a:160.0.20261104181552")
-
     testImplementation("junit:junit:4.13.2")
 }

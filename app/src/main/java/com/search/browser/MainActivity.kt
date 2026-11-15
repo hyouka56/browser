@@ -5,16 +5,13 @@ import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
-import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
-import android.os.Environment
 import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
-import android.webkit.URLUtil
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageButton
@@ -26,54 +23,33 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
+import com.cefrium.CefriumBrowser
 import org.json.JSONArray
 import org.json.JSONObject
-import org.mozilla.geckoview.ContentBlocking
-import org.mozilla.geckoview.GeckoSession
-import org.mozilla.geckoview.GeckoSessionSettings
-import org.mozilla.geckoview.GeckoView
-import org.mozilla.geckoview.WebResponse
 import java.io.File
-import java.io.FileOutputStream
-import java.io.InputStream
 import java.util.Locale
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.atomic.AtomicReference
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var geckoView: GeckoView
-    private lateinit var geckoSession: GeckoSession
+    private lateinit var browser: CefriumBrowser
     private lateinit var browserSlot: FrameLayout
     private lateinit var downloadsPanel: ScrollView
     private lateinit var downloadsList: LinearLayout
     private lateinit var searchField: EditText
     private lateinit var shieldButton: ImageButton
     private lateinit var rendererErrorPanel: FrameLayout
-    private lateinit var rendererErrorMessage: TextView
-    private lateinit var pageProgress: ProgressBar
 
-    @Volatile
+    private var rendererRecoveryAttempts = 0
+    private var rendererRecoveryPending = false
+    private var lastRequestedUrl = "about:blank"
+    private var lastSuccessfulUrl = "about:blank"
+    private var testCrashRenderer = false
+    private var testCrashTriggered = false
+    private val preferences by lazy { getSharedPreferences(PREFERENCES, MODE_PRIVATE) }
+    private val downloadRecords = LinkedHashMap<Int, DownloadRecord>()
+    private val activeDownloadItems = LinkedHashMap<String, CefriumBrowser.DownloadItem>()
     private var adBlockingEnabled = true
     private var showingDownloads = false
-    private var lastSuccessfulUrl = "about:blank"
-    private var currentPageUrl = "about:blank"
-    private var sessionRecoveryPending = false
-    private var sessionRecoveryAttempts = 0
-    private var testSessionRecovery = false
-    private var testSessionRecoveryTriggered = false
-    private var canGoBack = false
-
-    private val preferences by lazy {
-        getSharedPreferences(PREFERENCES, MODE_PRIVATE)
-    }
-    private val downloadRecords = LinkedHashMap<Long, DownloadRecord>()
-    private val downloadIdGenerator = AtomicLong(System.currentTimeMillis())
-    private val downloadExecutor = Executors.newSingleThreadExecutor()
-    private val activeDownloads = ConcurrentHashMap<Long, ActiveDownload>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -86,299 +62,241 @@ class MainActivity : AppCompatActivity() {
         adBlockingEnabled = preferences.getBoolean(KEY_AD_BLOCK, true)
         lastSuccessfulUrl = preferences.getString(KEY_LAST_URL, "about:blank").orEmpty()
             .ifBlank { "about:blank" }
-        currentPageUrl = lastSuccessfulUrl
+        lastRequestedUrl = lastSuccessfulUrl
         restoreSavedDownloads()
         buildLayout()
-        BrowserApp.runtime.settings.contentBlocking.setAntiTracking(
-            if (adBlockingEnabled) ContentBlocking.AntiTracking.DEFAULT
-            else ContentBlocking.AntiTracking.NONE
-        )
 
-        Log.i(
-            TAG,
-            "GECKOVIEW_ENGINE version=${BrowserApp.GECKOVIEW_VERSION} " +
-                "supportedAbis=${android.os.Build.SUPPORTED_ABIS.joinToString()}"
-        )
-
-        testSessionRecovery = BuildConfig.DEBUG &&
-            intent.getBooleanExtra(EXTRA_TEST_RECOVER_SESSION, false)
-
+        testCrashRenderer = BuildConfig.DEBUG &&
+            intent.getBooleanExtra(EXTRA_TEST_CRASH_RENDERER, false)
         val testUrl = if (BuildConfig.DEBUG) {
             intent.getStringExtra(EXTRA_TEST_URL)?.takeIf { it.isNotBlank() }
         } else {
             null
         }
-        val initialUrl = testUrl ?: lastSuccessfulUrl
+        val startUrl = testUrl ?: lastSuccessfulUrl
+        attachBrowser(startUrl, savedInstanceState?.getBundle(KEY_BROWSER_STATE))
 
-        geckoSession = createGeckoSession()
-        geckoSession.open(BrowserApp.runtime)
-        geckoView.setSession(geckoSession)
-        geckoSession.loadUri(initialUrl)
-
+        Log.i(
+            TAG,
+            "CEF_ENGINE version=0.20.0 chromium=156.0.8078.88 " +
+                "abi=" + android.os.Build.SUPPORTED_ABIS.joinToString()
+        )
         updateShieldButton()
         renderDownloads()
     }
 
-    private fun createGeckoSession(): GeckoSession {
-        return GeckoSession(
-            GeckoSessionSettings.Builder()
-                .useTrackingProtection(adBlockingEnabled)
-                .build()
-        ).apply {
-            setContentDelegate(object : GeckoSession.ContentDelegate {
-                override fun onTitleChange(session: GeckoSession, title: String?) {
-                    Log.i(TAG, "PAGE_TITLE title=${title.orEmpty()}")
-                }
+    private fun attachBrowser(initialUrl: String, savedState: Bundle? = null) {
+        val instance = CefriumBrowser.createWithSurface(this)
+        browser = instance
+        instance.setBackgroundColor(Color.BLACK)
+        instance.setAdBlockEnabled(adBlockingEnabled)
+        browserSlot.addView(
+            instance.getSurfaceContainer(),
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
 
-                override fun onFirstContentfulPaint(session: GeckoSession) {
-                    val url = currentPageUrl
-                    Log.i(TAG, "PAGE_FIRST_CONTENTFUL_PAINT url=$url")
-                    if (url.startsWith("http://") || url.startsWith("https://")) {
-                        lastSuccessfulUrl = url
-                        preferences.edit().putString(KEY_LAST_URL, url).apply()
+        instance.setCallback(object : CefriumBrowser.Callback() {
+            override fun onUrlChanged(url: String) {
+                lastRequestedUrl = url
+                runOnUiThread {
+                    if (!searchField.hasFocus()) searchField.setText(url)
+                }
+                Log.i(TAG, "PAGE_URL_CHANGED url=$url")
+            }
+
+            override fun onTitleChanged(title: String) {
+                Log.i(TAG, "PAGE_TITLE title=$title")
+            }
+
+            override fun onLoadingStateChanged(
+                isLoading: Boolean,
+                canGoBack: Boolean,
+                canGoForward: Boolean
+            ) {
+                Log.i(
+                    TAG,
+                    "PAGE_LOAD_STATE loading=$isLoading canGoBack=$canGoBack canGoForward=$canGoForward"
+                )
+                if (!isLoading) {
+                    val pageUrl = instance.getUrl().orEmpty().ifBlank { lastRequestedUrl }
+                    browserSlot.postDelayed({
+                        captureAndVerifyPage(instance, pageUrl)
+                    }, 1000L)
+                }
+            }
+        })
+
+        instance.setOnRenderProcessTerminatedListener { status, errorCode ->
+            runOnUiThread {
+                handleRendererTermination(instance, status, errorCode)
+            }
+        }
+
+        instance.setDownloadHandler(object : CefriumBrowser.CefriumDownloadHandler {
+            override fun onBeforeDownload(
+                item: CefriumBrowser.DownloadItem,
+                callback: CefriumBrowser.BeforeDownloadCallback
+            ) {
+                val name = item.getSuggestedName().orEmpty().ifBlank { "Download" }
+                activeDownloadItems[name] = item
+                runOnUiThread {
+                    updateDownloadRecord(
+                        name = name,
+                        path = item.getFullPath().orEmpty(),
+                        percent = item.getPercentComplete().coerceIn(0, 100),
+                        complete = item.isComplete(),
+                        canceled = item.isCanceled()
+                    )
+                }
+                callback.allow(null)
+            }
+
+            override fun onDownloadUpdated(item: CefriumBrowser.DownloadItem) {
+                val name = item.getSuggestedName().orEmpty().ifBlank { "Download" }
+                runOnUiThread {
+                    activeDownloadItems[name] = item
+                    updateDownloadRecord(
+                        name = name,
+                        path = item.getFullPath().orEmpty(),
+                        percent = item.getPercentComplete().coerceIn(0, 100),
+                        complete = item.isComplete(),
+                        canceled = item.isCanceled()
+                    )
+                }
+            }
+        })
+
+        instance.setOnDownloadListener(object : CefriumBrowser.OnDownloadListener {
+            override fun onDownloadUpdated(
+                name: String,
+                path: String,
+                percent: Int,
+                complete: Boolean,
+                canceled: Boolean
+            ) {
+                runOnUiThread {
+                    updateDownloadRecord(name, path, percent, complete, canceled)
+                }
+            }
+        })
+
+        if (savedState != null && initialUrl == lastSuccessfulUrl) {
+            instance.restoreState(savedState)
+        } else {
+            instance.loadUrl(initialUrl)
+        }
+        Log.i(
+            TAG,
+            "CEF_BROWSER_CREATED url=$initialUrl activeRenderers=" +
+                CefriumBrowser.activeRenderProcessCount()
+        )
+    }
+
+    private fun handleRendererTermination(
+        failedBrowser: CefriumBrowser,
+        status: Int,
+        errorCode: Int
+    ) {
+        if (isFinishing || isDestroyed || showingDownloads ||
+            !::browser.isInitialized || browser !== failedBrowser
+        ) return
+
+        Log.e(
+            TAG,
+            "CHROMIUM_RENDERER_TERMINATED status=$status errorCode=$errorCode " +
+                "url=$lastRequestedUrl activeRenderers=" +
+                CefriumBrowser.activeRenderProcessCount()
+        )
+
+        if (rendererRecoveryAttempts >= 1) {
+            rendererErrorPanel.visibility = View.VISIBLE
+            return
+        }
+
+        rendererRecoveryAttempts++
+        rendererRecoveryPending = true
+        val restoreUrl = lastSuccessfulUrl
+            .takeIf { it.startsWith("https://") || it.startsWith("http://") }
+            ?: "about:blank"
+
+        runCatching { failedBrowser.close() }
+            .onFailure { Log.w(TAG, "Closing the terminated Chromium browser reported an error", it) }
+        browserSlot.removeAllViews()
+        rendererErrorPanel.visibility = View.GONE
+
+        Log.i(TAG, "CHROMIUM_RECOVERY_STARTED restoreUrl=$restoreUrl")
+        attachBrowser(restoreUrl)
+    }
+
+    private fun captureAndVerifyPage(instance: CefriumBrowser, url: String) {
+        if (isFinishing || isDestroyed || showingDownloads ||
+            !::browser.isInitialized || browser !== instance
+        ) return
+
+        instance.captureBitmap { bitmap ->
+            if (!::browser.isInitialized || browser !== instance) {
+                bitmap?.recycle()
+                return@captureBitmap
+            }
+            if (bitmap == null) {
+                Log.w(TAG, "PAGE_BITMAP_CAPTURE_FAILED url=$url")
+                return@captureBitmap
+            }
+
+            val stepX = maxOf(1, bitmap.width / 80)
+            val stepY = maxOf(1, bitmap.height / 80)
+            var sampled = 0
+            var visible = 0
+            for (y in 0 until bitmap.height step stepY) {
+                for (x in 0 until bitmap.width step stepX) {
+                    val pixel = bitmap.getPixel(x, y)
+                    sampled++
+                    if (Color.red(pixel) + Color.green(pixel) + Color.blue(pixel) > 70) {
+                        visible++
                     }
-                    if (sessionRecoveryPending) {
-                        sessionRecoveryPending = false
-                        sessionRecoveryAttempts = 0
-                        Log.i(TAG, "SESSION_RECOVERY_COMPLETED url=$url")
-                    }
-                    scheduleSessionRecoveryTest(session, url)
                 }
+            }
+            val visibleRatio = if (sampled > 0) visible.toDouble() / sampled else 0.0
+            val ratioText = String.format(Locale.ROOT, "%.4f", visibleRatio)
+            Log.i(
+                TAG,
+                "PAGE_BITMAP_CAPTURED url=$url width=" + bitmap.width +
+                    " height=" + bitmap.height + " visibleRatio=$ratioText"
+            )
+            bitmap.recycle()
 
-                override fun onCrash(session: GeckoSession) {
-                    Log.e(TAG, "GECKO_CONTENT_PROCESS_CRASHED url=$currentPageUrl")
-                    runOnUiThread { recoverSession(session, "content-process-crash") }
+            if (visibleRatio >= 0.04 &&
+                (url.startsWith("https://") || url.startsWith("http://"))
+            ) {
+                lastSuccessfulUrl = url
+                preferences.edit().putString(KEY_LAST_URL, url).apply()
+                if (rendererRecoveryPending) {
+                    rendererRecoveryPending = false
+                    Log.i(TAG, "CHROMIUM_RECOVERY_COMPLETED url=$url")
                 }
-
-                override fun onKill(session: GeckoSession) {
-                    Log.e(TAG, "GECKO_CONTENT_PROCESS_KILLED url=$currentPageUrl")
-                    runOnUiThread { recoverSession(session, "content-process-killed") }
-                }
-
-                override fun onExternalResponse(session: GeckoSession, response: WebResponse) {
-                    handleExternalResponse(response)
-                }
-            })
-
-            setProgressDelegate(object : GeckoSession.ProgressDelegate {
-                override fun onPageStart(session: GeckoSession, url: String) {
-                    currentPageUrl = url
-                    runOnUiThread {
-                        rendererErrorPanel.visibility = View.GONE
-                        pageProgress.visibility = View.VISIBLE
-                        pageProgress.progress = 0
-                        if (!searchField.hasFocus()) searchField.setText(url)
-                    }
-                    Log.i(TAG, "PAGE_STARTED url=$url")
-                }
-
-                override fun onPageStop(session: GeckoSession, success: Boolean) {
-                    runOnUiThread {
-                        pageProgress.progress = if (success) 100 else 0
-                        pageProgress.visibility = View.GONE
-                        if (!success && !isFinishing && !isDestroyed) {
-                            showPageError("This page could not be loaded. Check the address or connection.")
-                        }
-                    }
-                    Log.i(TAG, "PAGE_LOAD_COMPLETE url=$currentPageUrl success=$success")
-                }
-
-                override fun onProgressChange(session: GeckoSession, progress: Int) {
-                    runOnUiThread {
-                        pageProgress.progress = progress.coerceIn(0, 100)
-                        pageProgress.visibility = if (progress in 1..99) View.VISIBLE else View.GONE
-                    }
-                }
-            })
-
-            setNavigationDelegate(object : GeckoSession.NavigationDelegate {
-                override fun onCanGoBack(session: GeckoSession, canGoBack: Boolean) {
-                    this@MainActivity.canGoBack = canGoBack
-                }
-            })
+                scheduleRendererCrashTest(instance, url)
+            }
         }
     }
 
-    private fun scheduleSessionRecoveryTest(session: GeckoSession, url: String) {
-        if (!testSessionRecovery || testSessionRecoveryTriggered ||
+    private fun scheduleRendererCrashTest(instance: CefriumBrowser, url: String) {
+        if (!testCrashRenderer || testCrashTriggered ||
             !url.startsWith("https://example.com")
         ) return
 
-        testSessionRecoveryTriggered = true
-        geckoView.postDelayed({
+        testCrashTriggered = true
+        Log.i(TAG, "TEST_RENDERER_CRASH_ARMED url=$url")
+        browserSlot.postDelayed({
             if (!isFinishing && !isDestroyed &&
-                ::geckoSession.isInitialized && geckoSession === session
+                ::browser.isInitialized && browser === instance
             ) {
-                Log.i(TAG, "TEST_TRIGGER_SESSION_RECOVERY url=$url")
-                recoverSession(session, "emulator-test")
+                Log.i(TAG, "TEST_TRIGGER_RENDERER_CRASH url=$url")
+                instance.loadUrl("chrome://crash")
             }
-        }, 5000L)
-    }
-
-    private fun recoverSession(failedSession: GeckoSession, reason: String) {
-        if (isFinishing || isDestroyed || showingDownloads ||
-            !::geckoSession.isInitialized || geckoSession !== failedSession
-        ) return
-
-        if (sessionRecoveryAttempts >= 2) {
-            showPageError("The page stopped repeatedly. Reload to try again.")
-            return
-        }
-        sessionRecoveryAttempts++
-
-        val restoreUrl = lastSuccessfulUrl
-            .takeIf { it.startsWith("http://") || it.startsWith("https://") }
-            ?: currentPageUrl.takeIf {
-                it.startsWith("http://") || it.startsWith("https://")
-            }
-            ?: "about:blank"
-
-        sessionRecoveryPending = true
-        rendererErrorPanel.visibility = View.GONE
-        pageProgress.visibility = View.VISIBLE
-        val detachedSession = geckoView.releaseSession()
-        if (detachedSession?.isOpen == true) {
-            runCatching { detachedSession.close() }
-                .onFailure { Log.w(TAG, "Failed to close the detached GeckoSession", it) }
-        }
-
-        val replacement = createGeckoSession()
-        geckoSession = replacement
-        replacement.open(BrowserApp.runtime)
-        geckoView.setSession(replacement)
-        replacement.loadUri(restoreUrl)
-        Log.i(TAG, "SESSION_RECOVERY_STARTED reason=$reason restoreUrl=$restoreUrl")
-    }
-
-    private fun handleExternalResponse(response: WebResponse) {
-        if (isFinishing || isDestroyed) {
-            runCatching { response.body?.close() }
-            return
-        }
-        val body = response.body
-        if (body == null) {
-            Log.w(TAG, "DOWNLOAD_RESPONSE_WITHOUT_BODY uri=${response.uri}")
-            return
-        }
-
-        val disposition = response.headers.entries
-            .firstOrNull { it.key.equals("content-disposition", ignoreCase = true) }
-            ?.value
-        val mimeType = response.headers.entries
-            .firstOrNull { it.key.equals("content-type", ignoreCase = true) }
-            ?.value
-            ?.substringBefore(';')
-        val guessedName = URLUtil.guessFileName(response.uri, disposition, mimeType)
-        val fileName = guessedName
-            .substringAfterLast('/')
-            .replace(Regex("[\\\\/:*?\"<>|]"), "_")
-            .take(180)
-            .ifBlank { "download" }
-        val downloadDirectory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: filesDir
-        if (!downloadDirectory.exists() && !downloadDirectory.mkdirs()) {
-            runCatching { body.close() }
-            Toast.makeText(this, "Could not create the downloads folder.", Toast.LENGTH_LONG).show()
-            return
-        }
-
-        val destination = File(downloadDirectory, fileName)
-        val id = downloadIdGenerator.getAndIncrement()
-        val totalBytes = response.headers.entries
-            .firstOrNull { it.key.equals("content-length", ignoreCase = true) }
-            ?.value
-            ?.toLongOrNull()
-            ?.coerceAtLeast(0L) ?: 0L
-        val record = DownloadRecord(
-            id = id,
-            name = fileName,
-            url = response.uri,
-            path = destination.absolutePath,
-            totalBytes = totalBytes,
-            receivedBytes = 0L,
-            percent = 0,
-            complete = false,
-            paused = false,
-            canceled = false,
-            interrupted = false,
-            updatedAt = System.currentTimeMillis()
-        )
-        val task = ActiveDownload()
-        activeDownloads[id] = task
-        runOnUiThread {
-            downloadRecords[id] = record
-            persistDownloads()
-            if (showingDownloads) renderDownloads()
-            Toast.makeText(this, "Download started: $fileName", Toast.LENGTH_SHORT).show()
-        }
-
-        downloadExecutor.execute {
-            var received = 0L
-            var lastUiUpdate = 0L
-            try {
-                body.use { input ->
-                    task.stream.set(input)
-                    FileOutputStream(destination).use { output ->
-                        val buffer = ByteArray(32 * 1024)
-                        while (!task.cancelRequested.get()) {
-                            val count = input.read(buffer)
-                            if (count < 0) break
-                            output.write(buffer, 0, count)
-                            received += count
-                            val now = System.currentTimeMillis()
-                            if (now - lastUiUpdate >= 400L) {
-                                lastUiUpdate = now
-                                val bytes = received
-                                runOnUiThread {
-                                    if (activeDownloads.containsKey(id)) {
-                                        record.receivedBytes = bytes
-                                        record.totalBytes = maxOf(record.totalBytes, bytes)
-                                        record.percent = if (record.totalBytes > 0L) {
-                                            ((bytes * 100L) / record.totalBytes).toInt().coerceIn(0, 99)
-                                        } else 0
-                                        record.updatedAt = now
-                                        persistDownloads()
-                                        if (showingDownloads) renderDownloads()
-                                    }
-                                }
-                            }
-                        }
-                        output.flush()
-                    }
-                }
-
-                if (task.cancelRequested.get()) {
-                    destination.delete()
-                } else {
-                    runOnUiThread {
-                        record.receivedBytes = received
-                        record.totalBytes = maxOf(record.totalBytes, received)
-                        record.percent = 100
-                        record.complete = true
-                        record.interrupted = false
-                        record.updatedAt = System.currentTimeMillis()
-                        persistDownloads()
-                        if (showingDownloads) renderDownloads()
-                        Toast.makeText(this, "Download complete: $fileName", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            } catch (error: Exception) {
-                if (!task.cancelRequested.get()) {
-                    Log.e(TAG, "Download failed: $fileName", error)
-                    destination.delete()
-                    runOnUiThread {
-                        record.interrupted = true
-                        record.complete = false
-                        record.updatedAt = System.currentTimeMillis()
-                        persistDownloads()
-                        if (showingDownloads) renderDownloads()
-                        Toast.makeText(this, "Download failed: $fileName", Toast.LENGTH_LONG).show()
-                    }
-                }
-            } finally {
-                task.stream.set(null)
-                activeDownloads.remove(id)
-            }
-        }
+        }, 2500L)
     }
 
     private fun buildLayout() {
@@ -388,61 +306,16 @@ class MainActivity : AppCompatActivity() {
         }
         setContentView(root)
 
-        val content = FrameLayout(this).apply {
-            setBackgroundColor(Color.BLACK)
-        }
-        root.addView(
-            content,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1f
-            )
-        )
+        val content = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        root.addView(content, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+        ))
 
-        browserSlot = FrameLayout(this).apply {
-            setBackgroundColor(Color.BLACK)
-        }
-        content.addView(
-            browserSlot,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        )
-
-        geckoView = GeckoView(this).apply {
-            setBackgroundColor(Color.BLACK)
-            coverUntilFirstPaint(Color.BLACK)
-            setAutofillEnabled(true)
-        }
-        browserSlot.addView(
-            geckoView,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        )
-
-        pageProgress = ProgressBar(
-            this,
-            null,
-            android.R.attr.progressBarStyleHorizontal
-        ).apply {
-            max = 100
-            progress = 0
-            visibility = View.GONE
-            progressTintList = ColorStateList.valueOf(Color.rgb(41, 217, 242))
-            progressBackgroundTintList = ColorStateList.valueOf(Color.TRANSPARENT)
-        }
-        browserSlot.addView(
-            pageProgress,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                dp(2),
-                Gravity.TOP
-            )
-        )
+        browserSlot = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        content.addView(browserSlot, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ))
 
         downloadsList = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -455,22 +328,11 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(Color.BLACK)
             addView(downloadsList)
         }
-        content.addView(
-            downloadsPanel,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        )
+        content.addView(downloadsPanel, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ))
 
-        rendererErrorMessage = textView(
-            "This page could not be displayed. Reload to try again.",
-            13f,
-            Color.rgb(180, 180, 180)
-        ).apply {
-            gravity = Gravity.CENTER
-            setPadding(0, dp(9), 0, dp(20))
-        }
         rendererErrorPanel = FrameLayout(this).apply {
             visibility = View.GONE
             setBackgroundColor(Color.BLACK)
@@ -478,35 +340,32 @@ class MainActivity : AppCompatActivity() {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
                 setPadding(dp(28), dp(24), dp(28), dp(24))
-                addView(
-                    textView("Page stopped unexpectedly", 18f, Color.WHITE, bold = true)
-                )
-                addView(rendererErrorMessage)
-                addView(
-                    textView("RELOAD PAGE", 12f, Color.WHITE, bold = true).apply {
-                        gravity = Gravity.CENTER
-                        setPadding(dp(20), dp(12), dp(20), dp(12))
-                        background = roundedBackground(Color.rgb(38, 38, 38), dp(12))
-                        setOnClickListener { retryBrowserPage() }
-                    }
-                )
+                addView(textView("Page stopped unexpectedly", 18f, Color.WHITE, bold = true))
+                addView(textView(
+                    "Chromium stopped rendering this page. Reload to continue.",
+                    13f,
+                    Color.rgb(170, 170, 170)
+                ).apply {
+                    gravity = Gravity.CENTER
+                    setPadding(0, dp(9), 0, dp(20))
+                })
+                addView(textView("RELOAD PAGE", 12f, Color.WHITE, bold = true).apply {
+                    gravity = Gravity.CENTER
+                    setPadding(dp(20), dp(12), dp(20), dp(12))
+                    background = roundedBackground(Color.rgb(38, 38, 38), dp(12))
+                    setOnClickListener { retryBrowserPage() }
+                })
             }
-            addView(
-                message,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    Gravity.CENTER
-                )
-            )
+            addView(message, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER
+            ))
         }
-        content.addView(
-            rendererErrorPanel,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        )
+        content.addView(rendererErrorPanel, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ))
 
         root.addView(buildBottomBar())
     }
@@ -536,37 +395,31 @@ class MainActivity : AppCompatActivity() {
             setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_search, 0, 0, 0)
             compoundDrawablePadding = dp(10)
             setSelectAllOnFocus(true)
-            setOnEditorActionListener { _, actionId, event ->
-                val enter = event?.keyCode == android.view.KeyEvent.KEYCODE_ENTER
-                if (actionId == EditorInfo.IME_ACTION_GO || enter) {
-                    navigateFromAddressBar()
-                    true
-                } else {
-                    false
-                }
-            }
-            setOnFocusChangeListener { _, hasFocus ->
-                if (hasFocus && showingDownloads) showBrowser()
-            }
         }
-        searchShell.addView(
-            searchField,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        )
+        searchField.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_GO ||
+                actionId == EditorInfo.IME_ACTION_SEARCH ||
+                actionId == EditorInfo.IME_ACTION_DONE
+            ) {
+                navigateFromAddressBar()
+                true
+            } else false
+        }
+        searchField.setOnFocusChangeListener { _, hasFocus ->
+            if (hasFocus && showingDownloads) showBrowser()
+        }
+        searchShell.addView(searchField, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ))
         bar.addView(searchShell, LinearLayout.LayoutParams(0, dp(54), 1f))
 
-        shieldButton = createIconButton(R.drawable.ic_shield, "Toggle tracking protection") {
+        shieldButton = createIconButton(R.drawable.ic_shield, "Toggle ad blocker") {
             toggleAdBlocking()
         }
-        bar.addView(
-            shieldButton,
-            LinearLayout.LayoutParams(dp(48), dp(54)).apply {
-                marginStart = dp(8)
-            }
-        )
+        bar.addView(shieldButton, LinearLayout.LayoutParams(dp(48), dp(54)).apply {
+            marginStart = dp(8)
+        })
 
         val downloadsButton = createIconButton(
             R.drawable.ic_download_arrow,
@@ -575,12 +428,9 @@ class MainActivity : AppCompatActivity() {
         ) {
             toggleDownloads()
         }
-        bar.addView(
-            downloadsButton,
-            LinearLayout.LayoutParams(dp(48), dp(54)).apply {
-                marginStart = dp(8)
-            }
-        )
+        bar.addView(downloadsButton, LinearLayout.LayoutParams(dp(48), dp(54)).apply {
+            marginStart = dp(8)
+        })
         return bar
     }
 
@@ -595,7 +445,7 @@ class MainActivity : AppCompatActivity() {
             contentDescription = description
             scaleType = android.widget.ImageView.ScaleType.CENTER
             background = if (transparentBackground) {
-                ColorDrawable(Color.TRANSPARENT)
+                android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
             } else {
                 roundedBackground(Color.rgb(17, 17, 17), dp(15))
             }
@@ -609,9 +459,11 @@ class MainActivity : AppCompatActivity() {
         if (target.isBlank()) return
 
         showBrowser()
+        rendererRecoveryAttempts = 0
+        rendererRecoveryPending = false
+        lastRequestedUrl = target
         rendererErrorPanel.visibility = View.GONE
-        sessionRecoveryAttempts = 0
-        geckoSession.loadUri(target)
+        browser.loadUrl(target)
         searchField.setText(target)
         searchField.clearFocus()
         (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
@@ -619,44 +471,37 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun retryBrowserPage() {
+        rendererRecoveryAttempts = 0
+        rendererRecoveryPending = false
         rendererErrorPanel.visibility = View.GONE
-        sessionRecoveryAttempts = 0
-        geckoSession.reload()
-    }
-
-    private fun showPageError(message: String) {
-        rendererErrorMessage.text = message
-        rendererErrorPanel.visibility = View.VISIBLE
+        val oldBrowser = browser
+        val restoreUrl = lastSuccessfulUrl
+        runCatching { oldBrowser.close() }
+            .onFailure { Log.w(TAG, "Closing browser before manual retry reported an error", it) }
+        browserSlot.removeAllViews()
+        attachBrowser(restoreUrl)
     }
 
     private fun toggleAdBlocking() {
         adBlockingEnabled = !adBlockingEnabled
         preferences.edit().putBoolean(KEY_AD_BLOCK, adBlockingEnabled).apply()
+        browser.setAdBlockEnabled(adBlockingEnabled)
         updateShieldButton()
-        BrowserApp.runtime.settings.contentBlocking.setAntiTracking(
-            if (adBlockingEnabled) ContentBlocking.AntiTracking.DEFAULT
-            else ContentBlocking.AntiTracking.NONE
-        )
-        geckoSession.settings.setUseTrackingProtection(adBlockingEnabled)
         Toast.makeText(
             this,
-            if (adBlockingEnabled) "Tracking protection enabled" else "Tracking protection disabled",
+            if (adBlockingEnabled) "Ad blocking enabled" else "Ad blocking disabled",
             Toast.LENGTH_SHORT
         ).show()
-        geckoSession.reload()
     }
 
     private fun updateShieldButton() {
         if (!::shieldButton.isInitialized) return
         shieldButton.alpha = if (adBlockingEnabled) 1f else 0.45f
-        shieldButton.contentDescription =
-            if (adBlockingEnabled) "Tracking protection on" else "Tracking protection off"
+        shieldButton.contentDescription = if (adBlockingEnabled) "Ad blocker on" else "Ad blocker off"
     }
 
     private fun toggleDownloads() {
-        if (showingDownloads) {
-            showBrowser()
-        } else {
+        if (showingDownloads) showBrowser() else {
             showingDownloads = true
             browserSlot.visibility = View.GONE
             downloadsPanel.visibility = View.VISIBLE
@@ -671,47 +516,73 @@ class MainActivity : AppCompatActivity() {
         browserSlot.visibility = View.VISIBLE
     }
 
-    private fun cancelDownload(record: DownloadRecord) {
-        activeDownloads[record.id]?.let { task ->
-            task.cancelRequested.set(true)
-            runCatching { task.stream.getAndSet(null)?.close() }
-                .onFailure { Log.w(TAG, "Failed to close canceled download stream", it) }
-        }
-        File(record.path).delete()
-        record.canceled = true
-        record.paused = false
-        record.interrupted = false
+    private fun updateDownloadRecord(
+        name: String,
+        path: String,
+        percent: Int,
+        complete: Boolean,
+        canceled: Boolean
+    ) {
+        val item = activeDownloadItems[name]
+        val id = item?.getId() ?: (path.ifBlank { name }).hashCode()
+        val record = downloadRecords[id] ?: DownloadRecord(
+            id = id,
+            name = name.ifBlank { "Download" },
+            url = item?.getUrl().orEmpty(),
+            path = path,
+            totalBytes = 0L,
+            receivedBytes = 0L,
+            speedBytesPerSecond = 0L,
+            percent = 0,
+            complete = false,
+            paused = false,
+            canceled = false,
+            interrupted = false,
+            updatedAt = System.currentTimeMillis()
+        )
+
+        record.name = name.ifBlank { record.name }
+        record.url = item?.getUrl().orEmpty().ifBlank { record.url }
+        record.path = path.ifBlank { item?.getFullPath().orEmpty().ifBlank { record.path } }
+        record.totalBytes = item?.getTotalBytes() ?: record.totalBytes
+        record.receivedBytes = item?.getReceivedBytes() ?: record.receivedBytes
+        record.speedBytesPerSecond = item?.getCurrentSpeed() ?: 0L
+        record.percent = (item?.getPercentComplete() ?: percent).coerceIn(0, 100)
+        record.complete = complete || (item?.isComplete() == true)
+        record.paused = item?.isPaused() == true
+        record.canceled = canceled || (item?.isCanceled() == true)
+        record.interrupted = item?.isInterrupted() == true
         record.updatedAt = System.currentTimeMillis()
+        record.liveItem = if (record.complete || record.canceled || record.interrupted) null else item
+
+        downloadRecords[id] = record
+        if (record.complete || record.canceled || record.interrupted) {
+            activeDownloadItems.remove(name)
+        }
+
         persistDownloads()
-        renderDownloads()
+        if (showingDownloads) renderDownloads()
     }
 
     private fun renderDownloads() {
         if (!::downloadsList.isInitialized) return
         downloadsList.removeAllViews()
         downloadsList.addView(textView("Downloads", 24f, Color.WHITE, bold = true))
-        downloadsList.addView(
-            textView(
-                "Files downloaded in this browser",
-                13f,
-                Color.rgb(155, 155, 155)
-            ).apply {
-                setPadding(0, dp(7), 0, dp(25))
-            }
-        )
+        downloadsList.addView(textView(
+            "Files downloaded in this browser",
+            13f,
+            Color.rgb(155, 155, 155)
+        ).apply { setPadding(0, dp(7), 0, dp(25)) })
 
         if (downloadRecords.isEmpty()) {
-            downloadsList.addView(
-                textView("No downloads yet", 14f, Color.rgb(180, 180, 180)).apply {
-                    setPadding(0, dp(24), 0, 0)
-                }
-            )
+            downloadsList.addView(textView(
+                "No downloads yet", 14f, Color.rgb(180, 180, 180)
+            ).apply { setPadding(0, dp(24), 0, 0) })
             return
         }
 
-        downloadRecords.values.sortedByDescending { it.updatedAt }.forEach {
-            downloadsList.addView(createDownloadCard(it))
-        }
+        downloadRecords.values.sortedByDescending { it.updatedAt }
+            .forEach { downloadsList.addView(createDownloadCard(it)) }
     }
 
     private fun createDownloadCard(record: DownloadRecord): View {
@@ -721,69 +592,77 @@ class MainActivity : AppCompatActivity() {
             background = roundedBackground(Color.rgb(16, 16, 16), dp(14))
         }
 
-        val active = !record.complete && !record.canceled && !record.interrupted
-        val statusText = when {
-            record.complete -> "DONE"
-            record.canceled -> "CANCELED"
-            record.interrupted -> "FAILED"
-            record.paused -> "PAUSED"
-            else -> "${record.percent}%"
-        }
-
         val titleRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        titleRow.addView(
-            textView(record.name, 14f, Color.WHITE, bold = true).apply {
-                maxLines = 1
-                ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
-            },
-            LinearLayout.LayoutParams(0, -2, 1f)
-        )
-        titleRow.addView(
-            textView(statusText, 10f, Color.rgb(190, 190, 190), bold = true)
-        )
+        titleRow.addView(textView(
+            record.name, 14f, Color.WHITE, bold = true
+        ).apply {
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+
+        val statusText = when {
+            record.complete -> "DONE"
+            record.canceled -> "CANCELED"
+            record.interrupted -> "INTERRUPTED"
+            record.paused -> "PAUSED"
+            else -> "${record.percent}%"
+        }
+        titleRow.addView(textView(statusText, 10f, Color.rgb(190, 190, 190), bold = true))
         card.addView(titleRow)
 
         val detail = when {
             record.complete -> "Completed · ${formatBytes(record.receivedBytes)}"
             record.canceled -> "Canceled"
-            record.interrupted -> "Download failed"
+            record.interrupted -> "Download interrupted"
             record.paused -> "Paused · ${formatBytes(record.receivedBytes)} received"
-            else -> "${formatBytes(record.receivedBytes)} of ${formatBytes(record.totalBytes)}"
+            else -> "${formatSpeed(record.speedBytesPerSecond)} · ${formatBytes(record.receivedBytes)} of ${formatBytes(record.totalBytes)}"
         }
-        card.addView(
-            textView(detail, 12f, Color.rgb(165, 165, 165)).apply {
-                setPadding(0, dp(8), 0, dp(10))
-            }
-        )
+        card.addView(textView(detail, 12f, Color.rgb(165, 165, 165)).apply {
+            setPadding(0, dp(8), 0, dp(10))
+        })
 
-        if (active) {
-            val progress = ProgressBar(
-                this,
-                null,
-                android.R.attr.progressBarStyleHorizontal
-            ).apply {
+        if (!record.complete && !record.canceled && !record.interrupted) {
+            val progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
                 max = 100
                 this.progress = record.percent
                 progressTintList = ColorStateList.valueOf(Color.WHITE)
                 progressBackgroundTintList = ColorStateList.valueOf(Color.rgb(58, 58, 58))
             }
-            card.addView(
-                progress,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    dp(4)
-                )
-            )
-            card.addView(
-                textView("CANCEL", 11f, Color.WHITE, bold = true).apply {
+            card.addView(progress, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(4)
+            ))
+
+            val liveItem = record.liveItem
+            if (liveItem != null) {
+                val actions = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.END
-                    setPadding(dp(12), dp(10), dp(2), dp(2))
-                    setOnClickListener { cancelDownload(record) }
+                    setPadding(0, dp(9), 0, 0)
                 }
-            )
+                val pauseResume = textView(
+                    if (record.paused) "RESUME" else "PAUSE",
+                    11f, Color.WHITE, bold = true
+                ).apply {
+                    setPadding(dp(12), dp(7), dp(12), dp(7))
+                    background = roundedBackground(Color.rgb(40, 40, 40), dp(9))
+                    setOnClickListener {
+                        if (record.paused) liveItem.resume() else liveItem.pause()
+                    }
+                }
+                val cancel = textView("CANCEL", 11f, Color.WHITE, bold = true).apply {
+                    setPadding(dp(12), dp(7), dp(12), dp(7))
+                    background = roundedBackground(Color.rgb(40, 40, 40), dp(9))
+                    setOnClickListener { liveItem.cancel() }
+                }
+                actions.addView(pauseResume)
+                actions.addView(cancel, LinearLayout.LayoutParams(-2, -2).apply {
+                    marginStart = dp(8)
+                })
+                card.addView(actions)
+            }
         } else if (record.complete) {
             card.setOnClickListener { openDownloadedFile(record) }
         }
@@ -796,14 +675,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openDownloadedFile(record: DownloadRecord) {
-        val file = File(record.path)
-        if (!file.exists()) {
-            Toast.makeText(this, "Downloaded file is not available.", Toast.LENGTH_LONG).show()
+        val file = record.path.takeIf { it.isNotBlank() }?.let(::File)
+        if (file == null || !file.exists()) {
+            Toast.makeText(this, "Downloaded file is not available at its saved path", Toast.LENGTH_LONG).show()
             return
         }
+
         runCatching {
             val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
-            val extension = record.name.substringAfterLast('.', "").lowercase(Locale.ROOT)
+            val extension = file.extension.lowercase(Locale.ROOT)
             val mime = android.webkit.MimeTypeMap.getSingleton()
                 .getMimeTypeFromExtension(extension) ?: "*/*"
             val intent = Intent(Intent.ACTION_VIEW).apply {
@@ -812,30 +692,28 @@ class MainActivity : AppCompatActivity() {
             }
             startActivity(intent)
         }.onFailure {
-            Log.w(TAG, "Could not open downloaded file ${record.name}", it)
-            Toast.makeText(this, "No installed app can open this file.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "No installed app can open this file", Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun persistDownloads() {
         val array = JSONArray()
         downloadRecords.values.forEach { record ->
-            array.put(
-                JSONObject().apply {
-                    put("id", record.id)
-                    put("name", record.name)
-                    put("url", record.url)
-                    put("path", record.path)
-                    put("total", record.totalBytes)
-                    put("received", record.receivedBytes)
-                    put("percent", record.percent)
-                    put("complete", record.complete)
-                    put("paused", record.paused)
-                    put("canceled", record.canceled)
-                    put("interrupted", record.interrupted)
-                    put("updated", record.updatedAt)
-                }
-            )
+            array.put(JSONObject().apply {
+                put("id", record.id)
+                put("name", record.name)
+                put("url", record.url)
+                put("path", record.path)
+                put("total", record.totalBytes)
+                put("received", record.receivedBytes)
+                put("speed", record.speedBytesPerSecond)
+                put("percent", record.percent)
+                put("complete", record.complete)
+                put("paused", record.paused)
+                put("canceled", record.canceled)
+                put("interrupted", record.interrupted)
+                put("updated", record.updatedAt)
+            })
         }
         preferences.edit().putString(KEY_DOWNLOADS, array.toString()).apply()
     }
@@ -848,23 +726,22 @@ class MainActivity : AppCompatActivity() {
                 val item = array.getJSONObject(index)
                 val complete = item.optBoolean("complete")
                 val record = DownloadRecord(
-                    id = item.optLong("id"),
+                    id = item.optInt("id"),
                     name = item.optString("name", "Download"),
                     url = item.optString("url"),
                     path = item.optString("path"),
                     totalBytes = item.optLong("total"),
                     receivedBytes = item.optLong("received"),
+                    speedBytesPerSecond = 0L,
                     percent = item.optInt("percent").coerceIn(0, 100),
                     complete = complete,
-                    paused = item.optBoolean("paused"),
+                    paused = false,
                     canceled = item.optBoolean("canceled"),
                     interrupted = item.optBoolean("interrupted") || !complete,
                     updatedAt = item.optLong("updated")
                 )
                 downloadRecords[record.id] = record
             }
-        }.onFailure {
-            Log.w(TAG, "Could not restore saved download records", it)
         }
     }
 
@@ -880,11 +757,10 @@ class MainActivity : AppCompatActivity() {
         if (bold) setTypeface(typeface, Typeface.BOLD)
     }
 
-    private fun roundedBackground(fill: Int, radius: Int) =
-        GradientDrawable().apply {
-            setColor(fill)
-            cornerRadius = radius.toFloat()
-        }
+    private fun roundedBackground(fill: Int, radius: Int) = GradientDrawable().apply {
+        setColor(fill)
+        cornerRadius = radius.toFloat()
+    }
 
     private fun formatBytes(value: Long): String {
         if (value <= 0L) return "—"
@@ -895,48 +771,42 @@ class MainActivity : AppCompatActivity() {
         return String.format(Locale.ROOT, "%.2f GB", mb / 1024.0)
     }
 
-    private fun dp(value: Int): Int =
-        (value * resources.displayMetrics.density).toInt()
+    private fun formatSpeed(value: Long): String {
+        if (value <= 0L) return "Starting…"
+        if (value < 1024) return "$value B/s"
+        if (value < 1024L * 1024L) return String.format(Locale.ROOT, "%.0f KB/s", value / 1024.0)
+        return String.format(Locale.ROOT, "%.1f MB/s", value / (1024.0 * 1024.0))
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     @Deprecated("Use the activity back dispatcher")
     override fun onBackPressed() {
         when {
             showingDownloads -> showBrowser()
-            ::geckoSession.isInitialized && geckoSession.isOpen && canGoBack -> geckoSession.goBack()
+            ::browser.isInitialized && browser.canGoBack() -> browser.goBack()
             else -> super.onBackPressed()
         }
     }
 
     override fun onPause() {
-        if (::geckoSession.isInitialized && geckoSession.isOpen) geckoSession.setActive(false)
+        if (::browser.isInitialized) browser.onPause()
         super.onPause()
     }
 
     override fun onResume() {
         super.onResume()
-        if (::geckoSession.isInitialized && geckoSession.isOpen) geckoSession.setActive(true)
+        if (::browser.isInitialized) browser.onResume()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
-        if (currentPageUrl.startsWith("http://") || currentPageUrl.startsWith("https://")) {
-            preferences.edit().putString(KEY_LAST_URL, currentPageUrl).apply()
-        }
+        if (::browser.isInitialized) outState.putBundle(KEY_BROWSER_STATE, browser.saveState())
+        preferences.edit().putString(KEY_LAST_URL, lastSuccessfulUrl).apply()
         super.onSaveInstanceState(outState)
     }
 
     override fun onDestroy() {
-        activeDownloads.values.forEach { task ->
-            task.cancelRequested.set(true)
-            runCatching { task.stream.getAndSet(null)?.close() }
-        }
-        downloadExecutor.shutdownNow()
-        if (::geckoView.isInitialized) {
-            val oldSession = geckoView.releaseSession()
-            if (oldSession?.isOpen == true) {
-                runCatching { oldSession.close() }
-                    .onFailure { Log.w(TAG, "GeckoSession cleanup reported an error", it) }
-            }
-        }
+        if (::browser.isInitialized) browser.close()
         super.onDestroy()
     }
 
@@ -944,14 +814,10 @@ class MainActivity : AppCompatActivity() {
         const val PREFERENCES = "browser_preferences"
         const val KEY_AD_BLOCK = "ad_block_enabled"
         const val KEY_DOWNLOADS = "downloads_json"
-        const val KEY_LAST_URL = "last_url"
-        const val TAG = "Browser"
+        const val KEY_BROWSER_STATE = "browser_state"
+        const val KEY_LAST_URL = "last_successful_url"
         const val EXTRA_TEST_URL = "com.search.browser.TEST_URL"
-        const val EXTRA_TEST_RECOVER_SESSION = "com.search.browser.TEST_RECOVER_SESSION"
+        const val EXTRA_TEST_CRASH_RENDERER = "com.search.browser.TEST_CRASH_RENDERER"
+        const val TAG = "Browser"
     }
-}
-
-private class ActiveDownload {
-    val cancelRequested = AtomicBoolean(false)
-    val stream = AtomicReference<InputStream?>(null)
 }
