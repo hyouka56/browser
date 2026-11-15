@@ -38,6 +38,7 @@ class MainActivity : AppCompatActivity() {
 
     private val preferences by lazy { getSharedPreferences(PREFERENCES, MODE_PRIVATE) }
     private val downloadRecords = LinkedHashMap<Int, DownloadRecord>()
+    private val activeDownloadItems = LinkedHashMap<String, CefriumBrowser.DownloadItem>()
     private var adBlockingEnabled = true
     private var showingDownloads = false
 
@@ -63,9 +64,49 @@ class MainActivity : AppCompatActivity() {
             )
         )
 
+        browser.setCallback(object : CefriumBrowser.Callback() {
+            override fun onUrlChanged(url: String) {
+                runOnUiThread {
+                    if (!searchField.hasFocus()) searchField.setText(url)
+                }
+            }
+        })
+
+        // The rich handler provides a DownloadItem with live speed, byte counts,
+        // and pause/resume/cancel controls. The legacy listener below supplies
+        // the user-facing name, path and percent changes.
+        browser.setDownloadHandler(object : CefriumBrowser.CefriumDownloadHandler {
+            override fun onBeforeDownload(
+                item: CefriumBrowser.DownloadItem,
+                callback: CefriumBrowser.BeforeDownloadCallback
+            ) {
+                val name = item.getSuggestedName().orEmpty().ifBlank { "Download" }
+                activeDownloadItems[name] = item
+                runOnUiThread {
+                    updateDownloadRecord(
+                        name = name,
+                        path = item.getFullPath().orEmpty(),
+                        percent = item.getPercentComplete().coerceIn(0, 100),
+                        complete = item.isComplete(),
+                        canceled = item.isCanceled()
+                    )
+                }
+                // null asks Cefrium to save to its app-managed Downloads directory.
+                callback.allow(null)
+            }
+        })
+
         browser.setOnDownloadListener(object : CefriumBrowser.OnDownloadListener {
-            override fun onDownloadUpdated(item: CefriumBrowser.DownloadItem) {
-                runOnUiThread { recordDownload(item) }
+            override fun onDownloadUpdated(
+                name: String,
+                path: String,
+                percent: Int,
+                complete: Boolean,
+                canceled: Boolean
+            ) {
+                runOnUiThread {
+                    updateDownloadRecord(name, path, percent, complete, canceled)
+                }
             }
         })
 
@@ -130,7 +171,7 @@ class MainActivity : AppCompatActivity() {
             setHintTextColor(Color.rgb(160, 160, 160))
             setTextColor(Color.WHITE)
             textSize = 14f
-            singleLine = true
+            setSingleLine(true)
             imeOptions = EditorInfo.IME_ACTION_GO
             inputType = android.text.InputType.TYPE_CLASS_TEXT or
                 android.text.InputType.TYPE_TEXT_VARIATION_URI
@@ -178,7 +219,7 @@ class MainActivity : AppCompatActivity() {
         return ImageButton(this).apply {
             setImageResource(icon)
             contentDescription = description
-            scaleType = ImageButton.ScaleType.CENTER
+            scaleType = android.widget.ImageView.ScaleType.CENTER
             background = roundedBackground(Color.rgb(17, 17, 17), dp(15))
             imageTintList = ColorStateList.valueOf(Color.WHITE)
             setOnClickListener { action() }
@@ -231,13 +272,20 @@ class MainActivity : AppCompatActivity() {
         browserSlot.visibility = View.VISIBLE
     }
 
-    private fun recordDownload(item: CefriumBrowser.DownloadItem) {
-        val id = item.getId()
+    private fun updateDownloadRecord(
+        name: String,
+        path: String,
+        percent: Int,
+        complete: Boolean,
+        canceled: Boolean
+    ) {
+        val item = activeDownloadItems[name]
+        val id = item?.getId() ?: (path.ifBlank { name }).hashCode()
         val record = downloadRecords[id] ?: DownloadRecord(
             id = id,
-            name = item.getSuggestedName().orEmpty().ifBlank { "Download" },
-            url = item.getUrl().orEmpty(),
-            path = item.getFullPath().orEmpty(),
+            name = name.ifBlank { "Download" },
+            url = item?.getUrl().orEmpty(),
+            path = path,
             totalBytes = 0L,
             receivedBytes = 0L,
             speedBytesPerSecond = 0L,
@@ -249,21 +297,25 @@ class MainActivity : AppCompatActivity() {
             updatedAt = System.currentTimeMillis()
         )
 
-        record.name = item.getSuggestedName().orEmpty().ifBlank { record.name }
-        record.url = item.getUrl().orEmpty().ifBlank { record.url }
-        record.path = item.getFullPath().orEmpty().ifBlank { record.path }
-        record.totalBytes = item.getTotalBytes()
-        record.receivedBytes = item.getReceivedBytes()
-        record.speedBytesPerSecond = item.getCurrentSpeed()
-        record.percent = item.getPercentComplete().coerceIn(0, 100)
-        record.complete = item.isComplete()
-        record.paused = item.isPaused()
-        record.canceled = item.isCanceled()
-        record.interrupted = item.isInterrupted()
+        record.name = name.ifBlank { record.name }
+        record.url = item?.getUrl().orEmpty().ifBlank { record.url }
+        record.path = path.ifBlank { item?.getFullPath().orEmpty().ifBlank { record.path } }
+        record.totalBytes = item?.getTotalBytes() ?: record.totalBytes
+        record.receivedBytes = item?.getReceivedBytes() ?: record.receivedBytes
+        record.speedBytesPerSecond = item?.getCurrentSpeed() ?: 0L
+        record.percent = (item?.getPercentComplete() ?: percent).coerceIn(0, 100)
+        record.complete = complete || (item?.isComplete() == true)
+        record.paused = item?.isPaused() == true
+        record.canceled = canceled || (item?.isCanceled() == true)
+        record.interrupted = item?.isInterrupted() == true
         record.updatedAt = System.currentTimeMillis()
-        record.liveItem = item
+        record.liveItem = if (record.complete || record.canceled || record.interrupted) null else item
 
         downloadRecords[id] = record
+        if (record.complete || record.canceled || record.interrupted) {
+            activeDownloadItems.remove(name)
+        }
+
         persistDownloads()
         if (showingDownloads) renderDownloads()
     }
