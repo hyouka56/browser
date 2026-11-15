@@ -220,7 +220,11 @@ class MainActivity : AppCompatActivity() {
             marginStart = dp(8)
         })
 
-        val downloadsButton = createIconButton(R.drawable.ic_download_arrow, "Open downloads") {
+        val downloadsButton = createIconButton(
+            R.drawable.ic_download_arrow,
+            "Open downloads",
+            transparentBackground = true
+        ) {
             toggleDownloads()
         }
         bar.addView(downloadsButton, LinearLayout.LayoutParams(dp(48), dp(54)).apply {
@@ -229,12 +233,21 @@ class MainActivity : AppCompatActivity() {
         return bar
     }
 
-    private fun createIconButton(icon: Int, description: String, action: () -> Unit): ImageButton {
+    private fun createIconButton(
+        icon: Int,
+        description: String,
+        transparentBackground: Boolean = false,
+        action: () -> Unit
+    ): ImageButton {
         return ImageButton(this).apply {
             setImageResource(icon)
             contentDescription = description
             scaleType = android.widget.ImageView.ScaleType.CENTER
-            background = roundedBackground(Color.rgb(17, 17, 17), dp(15))
+            background = if (transparentBackground) {
+                android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
+            } else {
+                roundedBackground(Color.rgb(17, 17, 17), dp(15))
+            }
             imageTintList = ColorStateList.valueOf(Color.WHITE)
             setOnClickListener { action() }
         }
