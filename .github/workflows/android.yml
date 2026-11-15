@@ -33,7 +33,7 @@ jobs:
       - name: Set up Android SDK tools
         uses: android-actions/setup-android@v4
         with:
-          accept-android-sdk-licenses: no
+          accept-android-sdk-licenses: false
           packages: ''
 
       - name: Install Android 17 SDK packages
