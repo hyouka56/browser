@@ -94,6 +94,20 @@ class MainActivity : AppCompatActivity() {
                 // null asks Cefrium to save to its app-managed Downloads directory.
                 callback.allow(null)
             }
+
+            override fun onDownloadUpdated(item: CefriumBrowser.DownloadItem) {
+                val name = item.getSuggestedName().orEmpty().ifBlank { "Download" }
+                runOnUiThread {
+                    activeDownloadItems[name] = item
+                    updateDownloadRecord(
+                        name = name,
+                        path = item.getFullPath().orEmpty(),
+                        percent = item.getPercentComplete().coerceIn(0, 100),
+                        complete = item.isComplete(),
+                        canceled = item.isCanceled()
+                    )
+                }
+            }
         })
 
         browser.setOnDownloadListener(object : CefriumBrowser.OnDownloadListener {
