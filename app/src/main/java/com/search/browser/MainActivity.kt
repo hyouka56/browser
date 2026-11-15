@@ -3,6 +3,7 @@ package com.search.browser
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.app.role.RoleManager
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
@@ -24,6 +25,7 @@ import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.PopupMenu
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
@@ -85,7 +87,8 @@ class MainActivity : AppCompatActivity() {
         } else {
             null
         }
-        val startUrl = testUrl ?: lastSuccessfulUrl
+        val incomingUrl = intent?.dataString?.takeIf(::isSupportedWebUrl)
+        val startUrl = testUrl ?: incomingUrl ?: lastSuccessfulUrl
         attachBrowser(startUrl, savedInstanceState?.getBundle(KEY_BROWSER_STATE))
 
         Log.i(
@@ -476,6 +479,25 @@ class MainActivity : AppCompatActivity() {
         bar.addView(downloadsButton, LinearLayout.LayoutParams(dp(48), dp(54)).apply {
             marginStart = dp(8)
         })
+
+        val optionsButton = textView("⋮", 26f, Color.WHITE, bold = true).apply {
+            gravity = Gravity.CENTER
+            contentDescription = "Browser options"
+            setOnClickListener { anchor ->
+                PopupMenu(this@MainActivity, anchor).apply {
+                    menu.add(if (isDefaultBrowser()) "Already the default browser" else "Set as default browser").apply {
+                        isEnabled = !isDefaultBrowser()
+                    }
+                    setOnMenuItemClickListener {
+                        requestDefaultBrowserRole()
+                        true
+                    }
+                }.show()
+            }
+        }
+        bar.addView(optionsButton, LinearLayout.LayoutParams(dp(40), dp(54)).apply {
+            marginStart = dp(2)
+        })
         return bar
     }
 
@@ -525,6 +547,52 @@ class MainActivity : AppCompatActivity() {
             .onFailure { Log.w(TAG, "Closing browser before manual retry reported an error", it) }
         browserSlot.removeAllViews()
         attachBrowser(restoreUrl)
+    }
+
+    private fun isSupportedWebUrl(value: String?): Boolean {
+        val scheme = value?.let { Uri.parse(it).scheme }?.lowercase(Locale.ROOT)
+        return scheme == "http" || scheme == "https"
+    }
+
+    private fun isDefaultBrowser(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+        val roleManager = getSystemService(RoleManager::class.java) ?: return false
+        return roleManager.isRoleAvailable(RoleManager.ROLE_BROWSER) &&
+            roleManager.isRoleHeld(RoleManager.ROLE_BROWSER)
+    }
+
+    private fun requestDefaultBrowserRole() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val roleManager = getSystemService(RoleManager::class.java)
+            if (roleManager != null && roleManager.isRoleAvailable(RoleManager.ROLE_BROWSER)) {
+                if (roleManager.isRoleHeld(RoleManager.ROLE_BROWSER)) {
+                    Toast.makeText(this, "Browser is already the default", Toast.LENGTH_SHORT).show()
+                } else {
+                    startActivityForResult(
+                        roleManager.createRequestRoleIntent(RoleManager.ROLE_BROWSER),
+                        REQUEST_BROWSER_ROLE
+                    )
+                }
+                return
+            }
+        }
+        runCatching {
+            startActivity(Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS))
+        }.onFailure {
+            Toast.makeText(this, "Open Android default apps settings to choose Browser", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val url = intent.dataString?.takeIf(::isSupportedWebUrl) ?: return
+        showBrowser()
+        rendererRecoveryAttempts = 0
+        rendererRecoveryPending = false
+        lastRequestedUrl = url
+        browser.loadUrl(url)
+        searchField.setText(url)
     }
 
     private fun toggleAdBlocking() {
@@ -984,6 +1052,7 @@ class MainActivity : AppCompatActivity() {
         const val PREFERENCES = "browser_preferences"
         const val HOME_URL = "https://www.google.com/"
         const val DOWNLOAD_NOTIFICATION_ID = 4103
+        const val REQUEST_BROWSER_ROLE = 4104
         const val APK_MIME_TYPE = "application/vnd.android.package-archive"
         const val KEY_AD_BLOCK = "ad_block_enabled"
         const val KEY_DOWNLOADS = "downloads_json"
