@@ -102,6 +102,7 @@ for required in \
   fi
 done
 
+adb logcat -d -v threadtime > "$ARTIFACTS/logcat.txt" 2>&1
 if grep -F "FATAL EXCEPTION" "$ARTIFACTS/logcat.txt" >/dev/null; then
   echo "A fatal application exception was found in Logcat." >&2
   exit 1
