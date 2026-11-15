@@ -4,14 +4,19 @@ import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.MediaStore
+import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
 import android.view.View
@@ -59,6 +64,7 @@ class MainActivity : AppCompatActivity() {
     private val preferences by lazy { getSharedPreferences(PREFERENCES, MODE_PRIVATE) }
     private val downloadRecords = LinkedHashMap<Int, DownloadRecord>()
     private val activeDownloadItems = LinkedHashMap<String, CefriumBrowser.DownloadItem>()
+    private val pendingPublicSaveIds = mutableSetOf<Int>()
     private var adBlockingEnabled = true
     private var showingDownloads = false
     private var notificationPermissionRequested = false
@@ -163,22 +169,51 @@ class MainActivity : AppCompatActivity() {
                 item: CefriumBrowser.DownloadItem,
                 callback: CefriumBrowser.BeforeDownloadCallback
             ) {
-                val name = item.getSuggestedName().orEmpty().ifBlank { "Download" }
-                activeDownloadItems[name] = item
-                runOnUiThread {
-                    updateDownloadRecord(
-                        name = name,
-                        path = item.getFullPath().orEmpty(),
-                        percent = item.getPercentComplete().coerceIn(0, 100),
-                        complete = item.isComplete(),
-                        canceled = item.isCanceled()
-                    )
+                val suggestedName = item.getSuggestedName().orEmpty()
+                val urlName = Uri.parse(item.getUrl().orEmpty()).lastPathSegment.orEmpty()
+                val isApk = suggestedName.endsWith(".apk", true) ||
+                    urlName.substringBefore("?").endsWith(".apk", true) ||
+                    item.getMimeType().orEmpty().equals(APK_MIME_TYPE, ignoreCase = true)
+                if (!isApk) {
+                    callback.cancel()
+                    runOnUiThread {
+                        Toast.makeText(this@MainActivity, "Only APK downloads are supported", Toast.LENGTH_LONG).show()
+                    }
+                    return
                 }
-                callback.allow(null)
+
+                val alreadyDownloading = activeDownloadItems.values.any {
+                    !it.isComplete() && !it.isCanceled() && !it.isInterrupted()
+                }
+                if (alreadyDownloading) {
+                    callback.cancel()
+                    runOnUiThread {
+                        Toast.makeText(this@MainActivity, "One APK download at a time", Toast.LENGTH_SHORT).show()
+                    }
+                    return
+                }
+
+                val name = normalizedApkName(suggestedName.ifBlank { urlName })
+                val stagingDirectory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                    ?: File(filesDir, "downloads")
+                if (!stagingDirectory.exists() && !stagingDirectory.mkdirs()) {
+                    callback.cancel()
+                    runOnUiThread {
+                        Toast.makeText(this@MainActivity, "Cannot prepare the download", Toast.LENGTH_LONG).show()
+                    }
+                    return
+                }
+
+                activeDownloadItems.clear()
+                downloadRecords.clear()
+                val target = File(stagingDirectory, item.getId().toString() + "-" + name)
+                target.delete()
+                activeDownloadItems[name] = item
+                callback.allow(target.absolutePath)
             }
 
             override fun onDownloadUpdated(item: CefriumBrowser.DownloadItem) {
-                val name = item.getSuggestedName().orEmpty().ifBlank { "Download" }
+                val name = normalizedApkName(item.getSuggestedName().orEmpty())
                 runOnUiThread {
                     activeDownloadItems[name] = item
                     updateDownloadRecord(
@@ -188,20 +223,6 @@ class MainActivity : AppCompatActivity() {
                         complete = item.isComplete(),
                         canceled = item.isCanceled()
                     )
-                }
-            }
-        })
-
-        instance.setOnDownloadListener(object : CefriumBrowser.OnDownloadListener {
-            override fun onDownloadUpdated(
-                name: String,
-                path: String,
-                percent: Int,
-                complete: Boolean,
-                canceled: Boolean
-            ) {
-                runOnUiThread {
-                    updateDownloadRecord(name, path, percent, complete, canceled)
                 }
             }
         })
@@ -569,7 +590,10 @@ class MainActivity : AppCompatActivity() {
 
         record.name = name.ifBlank { record.name }
         record.url = item?.getUrl().orEmpty().ifBlank { record.url }
-        record.path = path.ifBlank { item?.getFullPath().orEmpty().ifBlank { record.path } }
+        val incomingPath = path.ifBlank { item?.getFullPath().orEmpty() }
+        if (!record.path.startsWith("content://") && incomingPath.isNotBlank()) {
+            record.path = incomingPath
+        }
         record.totalBytes = item?.getTotalBytes() ?: record.totalBytes
         record.receivedBytes = item?.getReceivedBytes() ?: record.receivedBytes
         record.speedBytesPerSecond = item?.getCurrentSpeed() ?: 0L
@@ -585,10 +609,113 @@ class MainActivity : AppCompatActivity() {
         if (record.complete || record.canceled || record.interrupted) {
             activeDownloadItems.remove(name)
         }
-        publishDownloadNotification(record)
+        if (record.complete && !record.path.startsWith("content://")) {
+            persistDownloads()
+            if (showingDownloads) renderDownloads()
+            saveCompletedDownloadToPublicDownloads(record)
+            return
+        }
 
+        publishDownloadNotification(record)
         persistDownloads()
         if (showingDownloads) renderDownloads()
+    }
+
+    private fun normalizedApkName(value: String): String {
+        val cleaned = value.substringAfterLast('/').substringAfterLast('\\')
+            .replace(Regex("[\\\\/:*?\"<>|]"), "_")
+            .trim()
+            .ifBlank { "download.apk" }
+        return if (cleaned.endsWith(".apk", true)) cleaned else "$cleaned.apk"
+    }
+
+    private fun saveCompletedDownloadToPublicDownloads(record: DownloadRecord) {
+        if (!pendingPublicSaveIds.add(record.id)) return
+        val source = record.path.takeIf { it.isNotBlank() }?.let(::File)
+        if (source == null || !source.isFile) {
+            pendingPublicSaveIds.remove(record.id)
+            record.interrupted = true
+            record.complete = false
+            publishDownloadNotification(record)
+            persistDownloads()
+            if (showingDownloads) renderDownloads()
+            return
+        }
+
+        val displayName = normalizedApkName(record.name)
+        Thread({
+            var destinationUri: Uri? = null
+            var failure: Throwable? = null
+            try {
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, APK_MIME_TYPE)
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+                destinationUri = contentResolver.insert(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    values
+                ) ?: throw IllegalStateException("Unable to create a Downloads entry")
+
+                val output = contentResolver.openOutputStream(destinationUri!!, "w")
+                    ?: throw IllegalStateException("Unable to open the Downloads file")
+                output.use { stream ->
+                    source.inputStream().use { input -> input.copyTo(stream) }
+                }
+
+                val ready = ContentValues().apply {
+                    put(MediaStore.MediaColumns.IS_PENDING, 0)
+                }
+                contentResolver.update(destinationUri!!, ready, null, null)
+                if (source.exists() && !source.delete()) {
+                    Log.w(TAG, "Temporary APK could not be deleted: " + source.absolutePath)
+                }
+            } catch (error: Throwable) {
+                failure = error
+                destinationUri?.let { runCatching { contentResolver.delete(it, null, null) } }
+                Log.e(TAG, "Unable to move APK into the public Downloads folder", error)
+            }
+
+            val savedUri = destinationUri.takeIf { failure == null }
+            runOnUiThread {
+                pendingPublicSaveIds.remove(record.id)
+                if (savedUri != null) {
+                    record.name = displayName
+                    record.path = savedUri.toString()
+                    record.complete = true
+                    record.interrupted = false
+                    record.percent = 100
+                } else {
+                    record.complete = false
+                    record.interrupted = true
+                    Toast.makeText(
+                        this,
+                        "APK download finished, but saving to Downloads failed",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+                record.updatedAt = System.currentTimeMillis()
+                publishDownloadNotification(record)
+                persistDownloads()
+                if (showingDownloads) renderDownloads()
+            }
+        }, "public-apk-download-copy").start()
+    }
+
+    private fun createApkInstallIntent(uri: Uri): Intent {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            !packageManager.canRequestPackageInstalls()
+        ) {
+            return Intent(
+                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                Uri.parse("package:$packageName")
+            )
+        }
+        return Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
+            setDataAndType(uri, APK_MIME_TYPE)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
     }
 
     private fun createDownloadNotificationChannel() {
@@ -604,7 +731,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun publishDownloadNotification(record: DownloadRecord) {
         if (record.canceled || record.interrupted) {
-            NotificationManagerCompat.from(this).cancel(record.id)
+            NotificationManagerCompat.from(this).cancel(DOWNLOAD_NOTIFICATION_ID)
             return
         }
         if (Build.VERSION.SDK_INT >= 33 &&
@@ -623,17 +750,21 @@ class MainActivity : AppCompatActivity() {
             " · ${formatDuration(remaining / record.speedBytesPerSecond)} left"
         } else ""
         val status = if (record.complete) {
-            "Download complete · ${formatBytes(record.receivedBytes)}"
+            "APK ready to install · " + formatBytes(record.receivedBytes)
         } else if (record.totalBytes > 0L) {
             "${record.percent}% · ${formatBytes(record.receivedBytes)} of ${formatBytes(record.totalBytes)}$eta"
         } else {
             "Download started · ${formatBytes(record.receivedBytes)} received"
         }
-        val openIntent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        val openIntent = if (record.complete && record.path.startsWith("content://")) {
+            createApkInstallIntent(Uri.parse(record.path))
+        } else {
+            Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            }
         }
         val pendingIntent = PendingIntent.getActivity(
-            this, record.id, openIntent,
+            this, DOWNLOAD_NOTIFICATION_ID, openIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val notification = NotificationCompat.Builder(this, DOWNLOAD_CHANNEL_ID)
@@ -643,10 +774,14 @@ class MainActivity : AppCompatActivity() {
             .setContentIntent(pendingIntent)
             .setOnlyAlertOnce(true)
             .setOngoing(!record.complete)
-            .setAutoCancel(record.complete)
+            .setAutoCancel(
+                record.complete &&
+                    (Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
+                        packageManager.canRequestPackageInstalls())
+            )
             .setProgress(100, record.percent.coerceIn(0, 100), !record.complete && record.totalBytes <= 0L)
             .build()
-        runCatching { NotificationManagerCompat.from(this).notify(record.id, notification) }
+        runCatching { NotificationManagerCompat.from(this).notify(DOWNLOAD_NOTIFICATION_ID, notification) }
             .onFailure { Log.w(TAG, "Unable to post download notification", it) }
     }
 
@@ -659,7 +794,7 @@ class MainActivity : AppCompatActivity() {
         if (requestCode == REQUEST_NOTIFICATIONS &&
             grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED
         ) {
-            downloadRecords.values.filter { !it.complete && !it.canceled && !it.interrupted }
+            downloadRecords.values.filter { !it.canceled && !it.interrupted }
                 .forEach(::publishDownloadNotification)
         }
     }
@@ -681,7 +816,7 @@ class MainActivity : AppCompatActivity() {
         downloadsList.removeAllViews()
         downloadsList.addView(textView("Downloads", 24f, Color.WHITE, bold = true))
         downloadsList.addView(textView(
-            "Files downloaded in this browser",
+            "APK files saved to Downloads",
             13f,
             Color.rgb(155, 155, 155)
         ).apply { setPadding(0, dp(7), 0, dp(25)) })
@@ -694,6 +829,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         downloadRecords.values.sortedByDescending { it.updatedAt }
+            .take(1)
             .forEach { downloadsList.addView(createDownloadCard(it)) }
     }
 
@@ -747,34 +883,6 @@ class MainActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(4)
             ))
 
-            val liveItem = record.liveItem
-            if (liveItem != null) {
-                val actions = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.END
-                    setPadding(0, dp(9), 0, 0)
-                }
-                val pauseResume = textView(
-                    if (record.paused) "RESUME" else "PAUSE",
-                    11f, Color.WHITE, bold = true
-                ).apply {
-                    setPadding(dp(12), dp(7), dp(12), dp(7))
-                    background = roundedBackground(Color.rgb(40, 40, 40), dp(9))
-                    setOnClickListener {
-                        if (record.paused) liveItem.resume() else liveItem.pause()
-                    }
-                }
-                val cancel = textView("CANCEL", 11f, Color.WHITE, bold = true).apply {
-                    setPadding(dp(12), dp(7), dp(12), dp(7))
-                    background = roundedBackground(Color.rgb(40, 40, 40), dp(9))
-                    setOnClickListener { liveItem.cancel() }
-                }
-                actions.addView(pauseResume)
-                actions.addView(cancel, LinearLayout.LayoutParams(-2, -2).apply {
-                    marginStart = dp(8)
-                })
-                card.addView(actions)
-            }
         } else if (record.complete) {
             card.setOnClickListener { openDownloadedFile(record) }
         }
@@ -787,24 +895,33 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openDownloadedFile(record: DownloadRecord) {
-        val file = record.path.takeIf { it.isNotBlank() }?.let(::File)
-        if (file == null || !file.exists()) {
-            Toast.makeText(this, "Downloaded file is not available at its saved path", Toast.LENGTH_LONG).show()
+        if (!record.name.endsWith(".apk", true)) {
+            Toast.makeText(this, "Only APK files can be installed here", Toast.LENGTH_SHORT).show()
             return
         }
 
         runCatching {
-            val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
-            val extension = file.extension.lowercase(Locale.ROOT)
-            val mime = android.webkit.MimeTypeMap.getSingleton()
-                .getMimeTypeFromExtension(extension) ?: "*/*"
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, mime)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            val uri = if (record.path.startsWith("content://")) {
+                Uri.parse(record.path)
+            } else {
+                val file = record.path.takeIf { it.isNotBlank() }?.let(::File)
+                    ?: throw IllegalStateException("APK file path is missing")
+                if (!file.exists()) throw IllegalStateException("APK file is missing")
+                FileProvider.getUriForFile(this, "$packageName.files", file)
             }
-            startActivity(intent)
+            val needsInstallPermission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                !packageManager.canRequestPackageInstalls()
+            startActivity(createApkInstallIntent(uri))
+            if (needsInstallPermission) {
+                Toast.makeText(
+                    this,
+                    "Allow installs from Browser, then tap the APK notification again",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
         }.onFailure {
-            Toast.makeText(this, "No installed app can open this file", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Unable to open the APK installer", Toast.LENGTH_SHORT).show()
+            Log.e(TAG, "Unable to open APK installer", it)
         }
     }
 
@@ -909,6 +1026,13 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (::browser.isInitialized) browser.onResume()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            packageManager.canRequestPackageInstalls()
+        ) {
+            downloadRecords.values
+                .filter { it.complete && it.path.startsWith("content://") }
+                .forEach(::publishDownloadNotification)
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -926,6 +1050,8 @@ class MainActivity : AppCompatActivity() {
         const val PREFERENCES = "browser_preferences"
         const val HOME_URL = "https://www.google.com/"
         const val DOWNLOAD_CHANNEL_ID = "browser_downloads"
+        const val DOWNLOAD_NOTIFICATION_ID = 4103
+        const val APK_MIME_TYPE = "application/vnd.android.package-archive"
         const val REQUEST_NOTIFICATIONS = 4102
         const val KEY_AD_BLOCK = "ad_block_enabled"
         const val KEY_DOWNLOADS = "downloads_json"

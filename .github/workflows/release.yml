@@ -54,7 +54,7 @@ jobs:
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > app/release-key.jks
           chmod 600 app/release-key.jks
 
-      - name: Build version 1.0.5 signed Release APK
+      - name: Build version 1.0.6 signed Release APK
         env:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
@@ -73,8 +73,8 @@ jobs:
           test -x "$APKANALYZER"
           "$APKSIGNER" verify --verbose --print-certs "$APK" | tee release-signature.txt
           test "$("$APKANALYZER" manifest application-id "$APK")" = "com.search.browser"
-          test "$("$APKANALYZER" manifest version-name "$APK")" = "1.0.5"
-          test "$("$APKANALYZER" manifest version-code "$APK")" = "6"
+          test "$("$APKANALYZER" manifest version-name "$APK")" = "1.0.6"
+          test "$("$APKANALYZER" manifest version-code "$APK")" = "7"
           python3 - "$APK" <<'PY'
           import sys, zipfile
           apk = sys.argv[1]
@@ -88,14 +88,14 @@ jobs:
               raise SystemExit(f"Expected only arm64-v8a native libraries, found: {abis}")
           print(f"Verified native ABI: {abis[0]}")
           PY
-          cp "$APK" Browser-1.0.5-ARM64-Release-Signed.apk
+          cp "$APK" Browser-1.0.6-ARM64-Release-Signed.apk
 
       - name: Upload signed Release APK
         uses: actions/upload-artifact@v7
         with:
-          name: Browser-1.0.5-ARM64-Release-Signed
+          name: Browser-1.0.6-ARM64-Release-Signed
           path: |
-            Browser-1.0.5-ARM64-Release-Signed.apk
+            Browser-1.0.6-ARM64-Release-Signed.apk
             release-signature.txt
           if-no-files-found: error
           retention-days: 30
