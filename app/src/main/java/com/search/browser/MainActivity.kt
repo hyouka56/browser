@@ -1,15 +1,21 @@
 package com.search.browser
 
+import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
@@ -20,6 +26,10 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
@@ -33,6 +43,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var browser: CefriumBrowser
     private lateinit var browserSlot: FrameLayout
+    private lateinit var swipeRefresh: SwipeRefreshLayout
     private lateinit var downloadsPanel: ScrollView
     private lateinit var downloadsList: LinearLayout
     private lateinit var searchField: EditText
@@ -42,7 +53,7 @@ class MainActivity : AppCompatActivity() {
     private var rendererRecoveryAttempts = 0
     private var rendererRecoveryPending = false
     private var lastRequestedUrl = "about:blank"
-    private var lastSuccessfulUrl = "about:blank"
+    private var lastSuccessfulUrl = HOME_URL
     private var testCrashRenderer = false
     private var testCrashTriggered = false
     private val preferences by lazy { getSharedPreferences(PREFERENCES, MODE_PRIVATE) }
@@ -50,6 +61,7 @@ class MainActivity : AppCompatActivity() {
     private val activeDownloadItems = LinkedHashMap<String, CefriumBrowser.DownloadItem>()
     private var adBlockingEnabled = true
     private var showingDownloads = false
+    private var notificationPermissionRequested = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -60,10 +72,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         adBlockingEnabled = preferences.getBoolean(KEY_AD_BLOCK, true)
-        lastSuccessfulUrl = preferences.getString(KEY_LAST_URL, "about:blank").orEmpty()
-            .ifBlank { "about:blank" }
+        lastSuccessfulUrl = preferences.getString(KEY_LAST_URL, HOME_URL).orEmpty()
+            .takeIf { it.startsWith("https://") || it.startsWith("http://") } ?: HOME_URL
         lastRequestedUrl = lastSuccessfulUrl
         restoreSavedDownloads()
+        createDownloadNotificationChannel()
         buildLayout()
 
         testCrashRenderer = BuildConfig.DEBUG &&
@@ -121,6 +134,7 @@ class MainActivity : AppCompatActivity() {
                     "PAGE_LOAD_STATE loading=$isLoading canGoBack=$canGoBack canGoForward=$canGoForward"
                 )
                 if (!isLoading) {
+                    if (::swipeRefresh.isInitialized) swipeRefresh.isRefreshing = false
                     val pageUrl = instance.getUrl().orEmpty().ifBlank { lastRequestedUrl }
                     if (pageUrl.startsWith("https://") || pageUrl.startsWith("http://")) {
                         lastSuccessfulUrl = pageUrl
@@ -312,7 +326,24 @@ class MainActivity : AppCompatActivity() {
         ))
 
         browserSlot = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
-        content.addView(browserSlot, FrameLayout.LayoutParams(
+        swipeRefresh = SwipeRefreshLayout(this).apply {
+            setColorSchemeColors(Color.WHITE)
+            setProgressBackgroundColorSchemeColor(Color.rgb(24, 24, 24))
+            setOnChildScrollUpCallback { _, _ -> browserSlot.canScrollVertically(-1) }
+            setOnRefreshListener {
+                if (::browser.isInitialized && !showingDownloads) {
+                    val currentUrl = browser.getUrl().orEmpty().ifBlank { lastSuccessfulUrl }
+                    browser.loadUrl(currentUrl)
+                } else {
+                    isRefreshing = false
+                }
+            }
+            addView(browserSlot, ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            ))
+        }
+        content.addView(swipeRefresh, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT
         ))
@@ -487,11 +518,6 @@ class MainActivity : AppCompatActivity() {
         preferences.edit().putBoolean(KEY_AD_BLOCK, adBlockingEnabled).apply()
         browser.setAdBlockEnabled(adBlockingEnabled)
         updateShieldButton()
-        Toast.makeText(
-            this,
-            if (adBlockingEnabled) "Ad blocking enabled" else "Ad blocking disabled",
-            Toast.LENGTH_SHORT
-        ).show()
     }
 
     private fun updateShieldButton() {
@@ -503,7 +529,7 @@ class MainActivity : AppCompatActivity() {
     private fun toggleDownloads() {
         if (showingDownloads) showBrowser() else {
             showingDownloads = true
-            browserSlot.visibility = View.GONE
+            swipeRefresh.visibility = View.GONE
             downloadsPanel.visibility = View.VISIBLE
             searchField.clearFocus()
             renderDownloads()
@@ -513,7 +539,7 @@ class MainActivity : AppCompatActivity() {
     private fun showBrowser() {
         showingDownloads = false
         downloadsPanel.visibility = View.GONE
-        browserSlot.visibility = View.VISIBLE
+        swipeRefresh.visibility = View.VISIBLE
     }
 
     private fun updateDownloadRecord(
@@ -559,9 +585,95 @@ class MainActivity : AppCompatActivity() {
         if (record.complete || record.canceled || record.interrupted) {
             activeDownloadItems.remove(name)
         }
+        publishDownloadNotification(record)
 
         persistDownloads()
         if (showingDownloads) renderDownloads()
+    }
+
+    private fun createDownloadNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                DOWNLOAD_CHANNEL_ID,
+                "Browser downloads",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply { description = "Download progress and completion" }
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        }
+    }
+
+    private fun publishDownloadNotification(record: DownloadRecord) {
+        if (record.canceled || record.interrupted) {
+            NotificationManagerCompat.from(this).cancel(record.id)
+            return
+        }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            if (!notificationPermissionRequested) {
+                notificationPermissionRequested = true
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS)
+            }
+            return
+        }
+
+        val remaining = (record.totalBytes - record.receivedBytes).coerceAtLeast(0L)
+        val eta = if (!record.complete && record.speedBytesPerSecond > 0L && record.totalBytes > 0L) {
+            " · ${formatDuration(remaining / record.speedBytesPerSecond)} left"
+        } else ""
+        val status = if (record.complete) {
+            "Download complete · ${formatBytes(record.receivedBytes)}"
+        } else if (record.totalBytes > 0L) {
+            "${record.percent}% · ${formatBytes(record.receivedBytes)} of ${formatBytes(record.totalBytes)}$eta"
+        } else {
+            "Download started · ${formatBytes(record.receivedBytes)} received"
+        }
+        val openIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this, record.id, openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = NotificationCompat.Builder(this, DOWNLOAD_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setContentTitle(record.name)
+            .setContentText(status)
+            .setContentIntent(pendingIntent)
+            .setOnlyAlertOnce(true)
+            .setOngoing(!record.complete)
+            .setAutoCancel(record.complete)
+            .setProgress(100, record.percent.coerceIn(0, 100), !record.complete && record.totalBytes <= 0L)
+            .build()
+        runCatching { NotificationManagerCompat.from(this).notify(record.id, notification) }
+            .onFailure { Log.w(TAG, "Unable to post download notification", it) }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_NOTIFICATIONS &&
+            grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            downloadRecords.values.filter { !it.complete && !it.canceled && !it.interrupted }
+                .forEach(::publishDownloadNotification)
+        }
+    }
+
+    private fun formatDuration(seconds: Long): String {
+        val safe = seconds.coerceAtLeast(0L)
+        val hours = safe / 3600L
+        val minutes = (safe % 3600L) / 60L
+        val secs = safe % 60L
+        return when {
+            hours > 0L -> "${hours}h ${minutes}m"
+            minutes > 0L -> "${minutes}m ${secs}s"
+            else -> "${secs}s"
+        }
     }
 
     private fun renderDownloads() {
@@ -812,6 +924,9 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         const val PREFERENCES = "browser_preferences"
+        const val HOME_URL = "https://www.google.com/"
+        const val DOWNLOAD_CHANNEL_ID = "browser_downloads"
+        const val REQUEST_NOTIFICATIONS = 4102
         const val KEY_AD_BLOCK = "ad_block_enabled"
         const val KEY_DOWNLOADS = "downloads_json"
         const val KEY_BROWSER_STATE = "browser_state"
