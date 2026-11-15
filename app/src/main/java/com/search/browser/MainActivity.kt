@@ -122,6 +122,15 @@ class MainActivity : AppCompatActivity() {
                 )
                 if (!isLoading) {
                     val pageUrl = instance.getUrl().orEmpty().ifBlank { lastRequestedUrl }
+                    if (pageUrl.startsWith("https://") || pageUrl.startsWith("http://")) {
+                        lastSuccessfulUrl = pageUrl
+                        preferences.edit().putString(KEY_LAST_URL, pageUrl).apply()
+                        if (rendererRecoveryPending) {
+                            rendererRecoveryPending = false
+                            Log.i(TAG, "CHROMIUM_RECOVERY_COMPLETED url=$pageUrl")
+                        }
+                        scheduleRendererCrashTest(instance, pageUrl)
+                    }
                     browserSlot.postDelayed({
                         captureAndVerifyPage(instance, pageUrl)
                     }, 1000L)
@@ -268,17 +277,8 @@ class MainActivity : AppCompatActivity() {
             )
             bitmap.recycle()
 
-            if (visibleRatio >= 0.04 &&
-                (url.startsWith("https://") || url.startsWith("http://"))
-            ) {
-                lastSuccessfulUrl = url
-                preferences.edit().putString(KEY_LAST_URL, url).apply()
-                if (rendererRecoveryPending) {
-                    rendererRecoveryPending = false
-                    Log.i(TAG, "CHROMIUM_RECOVERY_COMPLETED url=$url")
-                }
-                scheduleRendererCrashTest(instance, url)
-            }
+            // captureBitmap may omit Surface-backed compositor pixels on some Android
+            // releases. Use load-state and device screenshots for page verification.
         }
     }
 
@@ -296,7 +296,7 @@ class MainActivity : AppCompatActivity() {
                 Log.i(TAG, "TEST_TRIGGER_RENDERER_CRASH url=$url")
                 instance.loadUrl("chrome://crash")
             }
-        }, 2500L)
+        }, 5000L)
     }
 
     private fun buildLayout() {
