@@ -124,7 +124,7 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           name: Browser-debug-APK
-          path: "$RUNNER_TEMP/browser-apk"
+          path: ${{ runner.temp }}/browser-apk
 
       - name: Enable KVM
         run: |

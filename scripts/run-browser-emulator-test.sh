@@ -8,6 +8,13 @@ ACTIVITY="$PACKAGE/.MainActivity"
 ARTIFACTS="artifacts/api-$EXPECTED_API"
 mkdir -p "$ARTIFACTS"
 
+if [[ ! -f "$APK" ]]; then
+  echo "Debug APK was not found at: $APK" >&2
+  echo "Files under the expected download directory:" >&2
+  find "$(dirname "$APK")" -maxdepth 3 -type f -print >&2 || true
+  exit 1
+fi
+
 collect_evidence() {
   adb logcat -d -v threadtime > "$ARTIFACTS/logcat.txt" 2>&1 || true
   adb exec-out screencap -p > "$ARTIFACTS/final-screen.png" 2>/dev/null || true
