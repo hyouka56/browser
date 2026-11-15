@@ -35,7 +35,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var downloadsList: LinearLayout
     private lateinit var searchField: EditText
     private lateinit var shieldButton: ImageButton
+    private lateinit var rendererErrorPanel: FrameLayout
 
+    private var rendererRecoveryAttempts = 0
     private val preferences by lazy { getSharedPreferences(PREFERENCES, MODE_PRIVATE) }
     private val downloadRecords = LinkedHashMap<Int, DownloadRecord>()
     private val activeDownloadItems = LinkedHashMap<String, CefriumBrowser.DownloadItem>()
@@ -71,6 +73,23 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         })
+
+        browser.setOnRenderProcessTerminatedListener { status, errorCode ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed || showingDownloads ||
+                    !::rendererErrorPanel.isInitialized
+                ) return@runOnUiThread
+
+                android.util.Log.e(TAG, "Chromium renderer terminated: status=$status, errorCode=$errorCode")
+                if (rendererRecoveryAttempts == 0) {
+                    rendererRecoveryAttempts++
+                    rendererErrorPanel.visibility = View.GONE
+                    browser.reload()
+                } else {
+                    rendererErrorPanel.visibility = View.VISIBLE
+                }
+            }
+        }
 
         // The rich handler provides a DownloadItem with live speed, byte counts,
         // and pause/resume/cancel controls. The legacy listener below supplies
@@ -162,6 +181,40 @@ class MainActivity : AppCompatActivity() {
             addView(downloadsList)
         }
         content.addView(downloadsPanel, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ))
+
+        rendererErrorPanel = FrameLayout(this).apply {
+            visibility = View.GONE
+            setBackgroundColor(Color.BLACK)
+            val message = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setPadding(dp(28), dp(24), dp(28), dp(24))
+                addView(textView("Page stopped unexpectedly", 18f, Color.WHITE, bold = true))
+                addView(textView(
+                    "Chromium stopped rendering this page. Reload to continue.",
+                    13f,
+                    Color.rgb(170, 170, 170)
+                ).apply {
+                    gravity = Gravity.CENTER
+                    setPadding(0, dp(9), 0, dp(20))
+                })
+                addView(textView("RELOAD PAGE", 12f, Color.WHITE, bold = true).apply {
+                    gravity = Gravity.CENTER
+                    setPadding(dp(20), dp(12), dp(20), dp(12))
+                    background = roundedBackground(Color.rgb(38, 38, 38), dp(12))
+                    setOnClickListener { retryBrowserPage() }
+                })
+            }
+            addView(message, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER
+            ))
+        }
+        content.addView(rendererErrorPanel, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT
         ))
@@ -258,11 +311,19 @@ class MainActivity : AppCompatActivity() {
         if (target.isBlank()) return
 
         showBrowser()
+        rendererRecoveryAttempts = 0
+        rendererErrorPanel.visibility = View.GONE
         browser.loadUrl(target)
         searchField.setText(target)
         searchField.clearFocus()
         (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
             ?.hideSoftInputFromWindow(searchField.windowToken, 0)
+    }
+
+    private fun retryBrowserPage() {
+        rendererRecoveryAttempts = 0
+        rendererErrorPanel.visibility = View.GONE
+        browser.reload()
     }
 
     private fun toggleAdBlocking() {
@@ -597,5 +658,6 @@ class MainActivity : AppCompatActivity() {
         const val KEY_AD_BLOCK = "ad_block_enabled"
         const val KEY_DOWNLOADS = "downloads_json"
         const val KEY_BROWSER_STATE = "browser_state"
+        const val TAG = "Browser"
     }
 }
