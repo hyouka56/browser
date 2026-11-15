@@ -3,6 +3,10 @@ plugins {
 }
 
 android {
+    buildFeatures {
+        buildConfig = true
+    }
+
     namespace = "com.search.browser"
     compileSdk = 37
 
