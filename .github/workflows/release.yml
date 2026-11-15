@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   release:
-    name: Build signed ARM64 Release APK
+    name: Build persistently signed ARM64 Release APK
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -42,52 +42,53 @@ jobs:
           test -d "$ANDROID_HOME/platforms/android-37.0"
           test -x "$ANDROID_HOME/build-tools/37.0.0/apksigner"
 
-      - name: Generate one-time random signing key
+      - name: Restore and validate permanent signing key
         shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          STORE_PASSWORD="$(openssl rand -hex 32)"
-          KEY_PASSWORD="$(openssl rand -hex 32)"
-          KEY_ALIAS="browser-release"
-          echo "::add-mask::$STORE_PASSWORD"
-          echo "::add-mask::$KEY_PASSWORD"
-          {
-            echo "ANDROID_KEYSTORE_PASSWORD=$STORE_PASSWORD"
-            echo "ANDROID_KEY_PASSWORD=$KEY_PASSWORD"
-            echo "ANDROID_KEY_ALIAS=$KEY_ALIAS"
-          } >> "$GITHUB_ENV"
-          keytool -genkeypair -v \
-            -keystore app/release-key.jks \
-            -storetype JKS \
-            -storepass "$STORE_PASSWORD" \
-            -keypass "$KEY_PASSWORD" \
-            -alias "$KEY_ALIAS" \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=Browser Release, OU=Android, O=Browser, L=Unknown, ST=Unknown, C=US"
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Missing required permanent signing secret: $name"
+              exit 1
+            fi
+          done
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > app/release-key.jks
           chmod 600 app/release-key.jks
+          keytool -list -keystore app/release-key.jks \
+            -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+            -alias "$ANDROID_KEY_ALIAS" >/dev/null
 
-      - name: Build signed Release APK
+      - name: Build persistently signed ARM64 Release APK
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: gradle --no-daemon clean :app:assemblePhoneRelease
 
-      - name: Verify and upload signed ARM64 Release APK
+      - name: Verify and prepare signed ARM64 Release APK
         shell: bash
         run: |
           set -euo pipefail
           APK="$(find app/build/outputs/apk/phone/release -maxdepth 1 -type f -name '*.apk' ! -name '*unsigned*' -print -quit)"
           test -n "$APK"
           "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --verbose --print-certs "$APK" | tee release-signature.txt
-          cp "$APK" Browser-1.0.6-ARM64-Release-Signed.apk
+          cp "$APK" Browser-1.0.6-ARM64-Release-Persistent-Signed.apk
 
-      - name: Upload signed Release APK
+      - name: Upload persistently signed Release APK
         uses: actions/upload-artifact@v7
         with:
-          name: Browser-1.0.6-ARM64-Release-Signed-ONE-TIME-KEY
+          name: Browser-1.0.6-ARM64-Release-Persistent-Signed
           path: |
-            Browser-1.0.6-ARM64-Release-Signed.apk
+            Browser-1.0.6-ARM64-Release-Persistent-Signed.apk
             release-signature.txt
           if-no-files-found: error
           retention-days: 30
 
-      - name: Remove temporary signing material
+      - name: Remove restored signing material
         if: always()
         run: rm -f app/release-key.jks
