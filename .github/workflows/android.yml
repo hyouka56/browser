@@ -58,11 +58,11 @@ jobs:
           python3 - <<'PY'
           from zipfile import ZipFile
 
-          apks = [
-              "app/build/outputs/apk/debug/app-debug.apk",
-              "app/build/outputs/apk/release/app-release-unsigned.apk",
-          ]
-          for apk in apks:
+          expected = {
+              "app/build/outputs/apk/debug/app-debug.apk": ["x86_64"],
+              "app/build/outputs/apk/release/app-release-unsigned.apk": ["arm64-v8a"],
+          }
+          for apk, expected_abis in expected.items():
               with ZipFile(apk) as archive:
                   abis = sorted({
                       path.split("/")[1]
@@ -71,12 +71,9 @@ jobs:
                       and len(path.split("/")) > 2
                       and path.endswith(".so")
                   })
-              if abis and abis != ["arm64-v8a"]:
-                  raise SystemExit(f"{apk}: unexpected native ABI libraries: {abis}")
-              if abis:
-                  print(f"{apk}: native libraries are arm64-v8a only")
-              else:
-                  print(f"{apk}: no bundled native libraries; rendering uses the Android WebView provider")
+              if abis != expected_abis:
+                  raise SystemExit(f"{apk}: expected {expected_abis}, found {abis}")
+              print(f"{apk}: verified native ABI {abis}")
           PY
 
       - name: Upload installable debug APK for emulator tests

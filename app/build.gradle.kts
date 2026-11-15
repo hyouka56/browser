@@ -14,11 +14,8 @@ android {
         applicationId = "com.search.browser"
         minSdk = 29
         targetSdk = 36
-        versionCode = 2
-        versionName = "1.0.1"
-        // The app has no bundled Chromium engine or third-party native binaries.
-        // Any future app-native code is restricted to the 64-bit ARM target.
-        ndk { abiFilters += listOf("arm64-v8a") }
+        versionCode = 3
+        versionName = "1.0.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -46,6 +43,9 @@ dependencies {
     implementation("androidx.mediarouter:mediarouter:1.7.0")
     implementation("androidx.core:core:1.16.0")
     implementation("androidx.browser:browser:1.8.0")
-    implementation("androidx.webkit:webkit:1.18.0")
+
+    debugImplementation("org.mozilla.geckoview:geckoview-x86_64:160.0.20261104181552")
+    releaseImplementation("org.mozilla.geckoview:geckoview-arm64-v8a:160.0.20261104181552")
+
     testImplementation("junit:junit:4.13.2")
 }

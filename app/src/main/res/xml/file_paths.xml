@@ -3,4 +3,5 @@
     <files-path name="browser_files" path="." />
     <cache-path name="browser_cache" path="." />
     <external-files-path name="browser_external_files" path="." />
+    <external-files-path name="browser_downloads" path="Download/" />
 </paths>
