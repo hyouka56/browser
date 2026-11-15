@@ -50,6 +50,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var searchField: EditText
     private lateinit var shieldButton: ImageButton
     private lateinit var rendererErrorPanel: FrameLayout
+    private lateinit var defaultBrowserButton: TextView
 
     private var rendererRecoveryAttempts = 0
     private var rendererRecoveryPending = false
@@ -104,6 +105,24 @@ class MainActivity : AppCompatActivity() {
         val instance = CefriumBrowser.createWithSurface(this)
         browser = instance
         instance.setBackgroundColor(Color.BLACK)
+        instance.addDocumentStartJavaScript(
+            """
+            (() => {
+                const stylesheet = new CSSStyleSheet();
+                stylesheet.replaceSync(`
+                    :root, html, body {
+                        background: #000000 !important;
+                        color-scheme: dark !important;
+                    }
+                    body {
+                        min-height: 100vh;
+                    }
+                `);
+                document.adoptedStyleSheets = [...document.adoptedStyleSheets, stylesheet];
+            })();
+            """.trimIndent(),
+            setOf("*")
+        )
         instance.setAdBlockEnabled(adBlockingEnabled)
         browserSlot.addView(
             instance.getSurfaceContainer(),
@@ -136,6 +155,7 @@ class MainActivity : AppCompatActivity() {
                     "PAGE_LOAD_STATE loading=$isLoading canGoBack=$canGoBack canGoForward=$canGoForward"
                 )
                 if (!isLoading) {
+                    instance.setDarkMode(true)
                     if (::swipeRefresh.isInitialized) swipeRefresh.isRefreshing = false
                     val pageUrl = instance.getUrl().orEmpty().ifBlank { lastRequestedUrl }
                     if (pageUrl.startsWith("https://") || pageUrl.startsWith("http://")) {
@@ -480,22 +500,25 @@ class MainActivity : AppCompatActivity() {
             marginStart = dp(8)
         })
 
-        val optionsButton = textView("⋮", 26f, Color.WHITE, bold = true).apply {
+        defaultBrowserButton = textView("⋮", 26f, Color.WHITE, bold = true).apply {
             gravity = Gravity.CENTER
             contentDescription = "Browser options"
+            visibility = if (isDefaultBrowser()) View.GONE else View.VISIBLE
             setOnClickListener { anchor ->
-                PopupMenu(this@MainActivity, anchor).apply {
-                    menu.add(if (isDefaultBrowser()) "Already the default browser" else "Set as default browser").apply {
-                        isEnabled = !isDefaultBrowser()
-                    }
-                    setOnMenuItemClickListener {
-                        requestDefaultBrowserRole()
-                        true
-                    }
-                }.show()
+                if (isDefaultBrowser()) {
+                    updateDefaultBrowserButton()
+                } else {
+                    PopupMenu(this@MainActivity, anchor).apply {
+                        menu.add("Set as default browser")
+                        setOnMenuItemClickListener {
+                            requestDefaultBrowserRole()
+                            true
+                        }
+                    }.show()
+                }
             }
         }
-        bar.addView(optionsButton, LinearLayout.LayoutParams(dp(40), dp(54)).apply {
+        bar.addView(defaultBrowserButton, LinearLayout.LayoutParams(dp(40), dp(54)).apply {
             marginStart = dp(2)
         })
         return bar
@@ -559,6 +582,11 @@ class MainActivity : AppCompatActivity() {
         val roleManager = getSystemService(RoleManager::class.java) ?: return false
         return roleManager.isRoleAvailable(RoleManager.ROLE_BROWSER) &&
             roleManager.isRoleHeld(RoleManager.ROLE_BROWSER)
+    }
+
+    private fun updateDefaultBrowserButton() {
+        if (!::defaultBrowserButton.isInitialized) return
+        defaultBrowserButton.visibility = if (isDefaultBrowser()) View.GONE else View.VISIBLE
     }
 
     private fun requestDefaultBrowserRole() {
@@ -1028,6 +1056,7 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (::browser.isInitialized) browser.onResume()
+        updateDefaultBrowserButton()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
             packageManager.canRequestPackageInstalls()
         ) {
