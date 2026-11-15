@@ -17,6 +17,8 @@ jobs:
     name: Build signed ARM64 Release APK
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -32,17 +34,15 @@ jobs:
         with:
           gradle-version: "9.7.1"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
-
-      - name: Install Android 17 SDK packages
+      - name: Install Android CLI and SDK packages
         shell: bash
         run: |
           set -euo pipefail
-          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager -print -quit)"
-          test -x "$SDKMANAGER"
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER" --install "platforms;android-37.0" "build-tools;37.0.0" "platform-tools"
+          curl -fsSL https://dl.google.com/android/cli/latest/linux_x86_64/install.sh | bash
+          command -v android
+          yes | android --sdk="$ANDROID_HOME" sdk install --canary platforms/android-37.0 build-tools/37.0.0 platform-tools
+          test -d "$ANDROID_HOME/platforms/android-37.0"
+          test -x "$ANDROID_HOME/build-tools/37.0.0/apksigner"
 
       - name: Restore permanent release signing key
         shell: bash
@@ -59,7 +59,7 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: ./gradlew --no-daemon clean :app:assemblePhoneRelease
+        run: gradle --no-daemon clean :app:assemblePhoneRelease
 
       - name: Verify package, version, ABI, and release signature
         shell: bash
