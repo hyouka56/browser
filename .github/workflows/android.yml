@@ -50,16 +50,20 @@ jobs:
           "$ANDROID_CLI" --no-metrics sdk install --canary "platforms;android-37.0" "build-tools;37.0.0" platform-tools < "$RUNNER_TEMP/android-sdk-licenses.txt"
 
       - name: Run unit tests and build APKs
-        run: gradle --no-daemon clean testEmulatorDebugUnitTest assembleEmulatorDebug assemblePhoneRelease
+        run: gradle --no-daemon clean testEmulatorDebugUnitTest assembleEmulatorDebug assemblePhoneDebug assemblePhoneRelease
 
-      - name: Verify APK native ABI contents
+      - name: Verify APK native ABI contents and debug signature
         shell: bash
         run: |
+          set -euo pipefail
+          PHONE_DEBUG="app/build/outputs/apk/phone/debug/app-phone-debug.apk"
+          PHONE_RELEASE="app/build/outputs/apk/phone/release/app-phone-release-unsigned.apk"
+          EMULATOR_DEBUG="app/build/outputs/apk/emulator/debug/app-emulator-debug.apk"
           python3 - <<'PY'
           from zipfile import ZipFile
-
           expected = {
               "app/build/outputs/apk/emulator/debug/app-emulator-debug.apk": ["x86_64"],
+              "app/build/outputs/apk/phone/debug/app-phone-debug.apk": ["arm64-v8a"],
               "app/build/outputs/apk/phone/release/app-phone-release-unsigned.apk": ["arm64-v8a"],
           }
           for apk, expected_abis in expected.items():
@@ -67,14 +71,22 @@ jobs:
                   abis = sorted({
                       path.split("/")[1]
                       for path in archive.namelist()
-                      if path.startswith("lib/")
-                      and len(path.split("/")) > 2
-                      and path.endswith(".so")
+                      if path.startswith("lib/") and len(path.split("/")) > 2 and path.endswith(".so")
                   })
               if abis != expected_abis:
                   raise SystemExit(f"{apk}: expected {expected_abis}, found {abis}")
               print(f"{apk}: verified native ABI {abis}")
           PY
+          "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --verbose "$PHONE_DEBUG"
+          "$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$PHONE_DEBUG" | grep -F "package: name='com.search.browser' versionCode='5' versionName='1.0.4'"
+
+      - name: Upload installable ARM64 debug APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: Browser-phone-ARM64-debug-signed
+          path: app/build/outputs/apk/phone/debug/app-phone-debug.apk
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Upload installable debug APK for emulator tests
         uses: actions/upload-artifact@v7
@@ -84,7 +96,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload unsigned release APK
+      - name: Upload unsigned production release APK
         uses: actions/upload-artifact@v7
         with:
           name: Browser-release-APK-unsigned
