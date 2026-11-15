@@ -1,6 +1,5 @@
 pluginManagement {
     repositories {
-        maven("https://maven.cefrium.com") { content { includeGroup("com.cefrium") } }
         google()
         mavenCentral()
         gradlePluginPortal()
@@ -11,7 +10,6 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        maven("https://maven.cefrium.com") { content { includeGroup("com.cefrium") } }
     }
 }
 rootProject.name = "Browser"

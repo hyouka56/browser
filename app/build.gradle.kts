@@ -1,6 +1,5 @@
 plugins {
     id("com.android.application")
-    id("com.cefrium") version "0.20.0"
 }
 
 android {
@@ -11,8 +10,10 @@ android {
         applicationId = "com.search.browser"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.0.1"
+        // The app has no bundled Chromium engine or third-party native binaries.
+        // Any future app-native code is restricted to the 64-bit ARM target.
         ndk { abiFilters += listOf("arm64-v8a") }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -22,13 +23,14 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    packaging { jniLibs { useLegacyPackaging = true } }
-
     buildTypes {
         debug { }
         release {
             isMinifyEnabled = false
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
 
@@ -36,10 +38,10 @@ android {
 }
 
 dependencies {
-    implementation("com.cefrium:cefrium-sdk:0.20.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.mediarouter:mediarouter:1.7.0")
     implementation("androidx.core:core:1.16.0")
     implementation("androidx.browser:browser:1.8.0")
+    implementation("androidx.webkit:webkit:1.18.0")
     testImplementation("junit:junit:4.13.2")
 }

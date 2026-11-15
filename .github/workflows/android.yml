@@ -1,4 +1,4 @@
-name: Android build
+name: Browser Android build and emulator tests
 
 on:
   push:
@@ -10,13 +10,17 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: browser-android-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
-    name: Build Browser APK
+    name: Build Browser APKs
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: Checkout
+      - name: Check out repository
         uses: actions/checkout@v7
 
       - name: Set up JDK 25
@@ -45,10 +49,10 @@ jobs:
           python3 -c "from pathlib import Path; import os; Path(os.environ['RUNNER_TEMP'] + '/android-sdk-licenses.txt').write_text('y\\n' * 1000)"
           "$ANDROID_CLI" --no-metrics sdk install --canary "platforms;android-37.0" "build-tools;37.0.0" platform-tools < "$RUNNER_TEMP/android-sdk-licenses.txt"
 
-      - name: Run tests and build APKs
+      - name: Run unit tests and build APKs
         run: gradle --no-daemon clean testDebugUnitTest assembleDebug assembleRelease
 
-      - name: Verify ARM64-only APKs
+      - name: Verify APK native ABI contents
         shell: bash
         run: |
           python3 - <<'PY'
@@ -67,25 +71,85 @@ jobs:
                       and len(path.split("/")) > 2
                       and path.endswith(".so")
                   })
-              if abis != ["arm64-v8a"]:
-                  raise SystemExit(
-                      f"{apk}: expected only arm64-v8a native libraries, found {abis}"
-                  )
-              print(f"{apk}: verified arm64-v8a only")
+              if abis and abis != ["arm64-v8a"]:
+                  raise SystemExit(f"{apk}: unexpected native ABI libraries: {abis}")
+              if abis:
+                  print(f"{apk}: native libraries are arm64-v8a only")
+              else:
+                  print(f"{apk}: no bundled native libraries; rendering uses the Android WebView provider")
           PY
 
-      - name: Upload installable debug ARM64 APK
+      - name: Upload installable debug APK for emulator tests
         uses: actions/upload-artifact@v7
         with:
-          name: Browser-debug-APK-arm64-v8a
+          name: Browser-debug-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload unsigned release ARM64 APK
+      - name: Upload unsigned release APK
         uses: actions/upload-artifact@v7
         with:
-          name: Browser-release-APK-arm64-v8a-unsigned
+          name: Browser-release-APK-unsigned
           path: app/build/outputs/apk/release/app-release-unsigned.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload unit-test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Browser-unit-test-report
+          path: app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: warn
+          retention-days: 14
+
+  emulator-test:
+    name: Browser runtime test on Android API ${{ matrix.api-level }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - api-level: 30
+          - api-level: 35
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Download debug APK
+        uses: actions/download-artifact@v7
+        with:
+          name: Browser-debug-APK
+          path: "$RUNNER_TEMP/browser-apk"
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Start Android Emulator and test Browser
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api-level }}
+          target: google_apis
+          arch: x86_64
+          profile: pixel_5
+          force-avd-creation: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          disable-animations: true
+          script: |
+            bash scripts/run-browser-emulator-test.sh "$RUNNER_TEMP/browser-apk/app-debug.apk" "${{ matrix.api-level }}"
+
+      - name: Upload emulator screenshots, Logcat, and report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Browser-emulator-API-${{ matrix.api-level }}-${{ github.run_id }}
+          path: artifacts/api-${{ matrix.api-level }}/
           if-no-files-found: warn
           retention-days: 14

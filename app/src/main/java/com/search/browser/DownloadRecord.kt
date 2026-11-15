@@ -1,20 +1,16 @@
 package com.search.browser
 
-import com.cefrium.CefriumBrowser
-
 data class DownloadRecord(
-    val id: Int,
+    val id: Long,
     var name: String,
     var url: String,
     var path: String,
     var totalBytes: Long,
     var receivedBytes: Long,
-    var speedBytesPerSecond: Long,
     var percent: Int,
     var complete: Boolean,
     var paused: Boolean,
     var canceled: Boolean,
     var interrupted: Boolean,
-    var updatedAt: Long,
-    @Transient var liveItem: CefriumBrowser.DownloadItem? = null
+    var updatedAt: Long
 )

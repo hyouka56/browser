@@ -1,36 +1,47 @@
-# Browser
+# Browser — Android WebView build and emulator tests
 
-Native Android browser built with Kotlin and a bundled Chromium engine.
+This repository builds the Android browser app and runs it in GitHub Actions emulators. The emulator workflow and scripts are maintained here; the source emulator template repository is not modified.
 
-- App name: Browser
-- Application ID: com.search.browser
-- UI: minimal black native Android UI, white text/icons, bottom search field
-- Engine: Cefrium 0.20.0, embedding Chromium 156.0.8078.88
-- Ad blocker: EasyList network filtering, controlled by the shield button
-- Downloads: in-app list with filename, live speed, percentage, progress, and pause/resume/cancel controls while active
+## Rendering engine
 
-## Build requirements
+The app uses the Android System WebView provider through the stable Android WebView APIs. It no longer embeds the Cefrium/CEF browser engine. The AndroidX WebKit integration is pinned to stable 1.18.0; the Chromium runtime itself is supplied and updated by the Android WebView provider on each device.
 
-- JDK 25
-- Gradle 9.7.1
-- Android Gradle Plugin 9.4
-- Android SDK platform 37
-- Android minSdk 29
+The app handles WebView renderer termination by removing and destroying the affected WebView instance, creating a fresh instance, and reloading the last successfully rendered URL. This follows Android's documented onRenderProcessGone recovery requirements.
 
-Run: gradle clean testDebugUnitTest assembleDebug
+## GitHub Actions emulator matrix
 
-Installable debug APK: app/build/outputs/apk/debug/app-debug.apk
+Every workflow run builds the Debug and unsigned Release APKs, runs unit tests, then downloads the Debug APK into two separate temporary emulators:
 
-GitHub Actions builds this APK after pushes to main and on manual workflow dispatch. The workflow uploads an artifact named Browser-debug-APK.
+| Emulator | Image | Status |
+|---|---|---|
+| Android API 30 | Google APIs, x86_64, Pixel 5 profile | Required |
+| Android API 35 | Google APIs, x86_64, Pixel 5 profile | Required |
 
-## Engine and limitations
+KVM is enabled before emulator startup. Both jobs run in GitHub Actions in this repository. Each emulator is discarded after its job.
 
-Cefrium embeds Chromium instead of using Android System WebView. It carries a large native engine; the upstream project reports approximately 89 MB compressed for ARM64 before the rest of the APK is counted. The app targets Cefrium-supported arm64-v8a, armeabi-v7a, and x86_64 ABIs.
+## Runtime test coverage
 
-Cefrium describes its SDK as pre-1.0/public beta. Its API may change before 1.0, so this app pins version 0.20.0. EasyList filtering is network-level; cosmetic element hiding is not included. The browser does not bypass CAPTCHAs or website bot checks.
+The emulator test script:
 
-Upstream references:
-- https://cefrium.com/quickstart/
-- https://cefrium.com/releases/
-- https://cefrium.com/guides/ad-blocking/
-- https://cefrium.com/docs/com/cefrium/CefriumBrowser.DownloadItem.html
+1. Verifies that the running emulator reports the requested API level.
+2. Installs the Debug APK and records device ABI information and the active WebView provider.
+3. Opens https://example.com/ through a debug-only test launch argument.
+4. Checks WebView DOM readiness and waits for postVisualStateCallback, which confirms that a page frame was drawn.
+5. Triggers the WebView test crash URL, verifies onRenderProcessGone, and checks that the app recreated the WebView and rendered the last successful page again.
+6. Checks that the app process survives and remains the resumed Activity.
+7. Saves Logcat, screenshots, package/activity dumps, WebView-provider information, and report.json as a workflow artifact.
+
+The deliberate renderer restart is a test-only path available in Debug builds. It is not enabled in Release builds.
+
+## Build artifacts
+
+- Browser-debug-APK: installable Debug APK used by emulator tests.
+- Browser-release-APK-unsigned: unsigned Release APK.
+- Browser-unit-test-report: Gradle unit-test report.
+- Browser-emulator-API-30 and Browser-emulator-API-35: emulator screenshots, Logcat, runtime details, and JSON reports.
+
+## Limitations
+
+The Android System WebView runtime is supplied by the device's installed provider, so its Chromium build can vary by Android device and provider update. The stable AndroidX WebKit library version is pinned; the underlying system WebView binary is not bundled inside this APK.
+
+The ad-block toggle currently uses a compact built-in host list rather than downloading the full EasyList subscription used by the removed Cefrium integration. Download handling is provided by Android DownloadManager.
