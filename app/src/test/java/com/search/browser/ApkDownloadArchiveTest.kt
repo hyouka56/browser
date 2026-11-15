@@ -1,0 +1,52 @@
+package com.search.browser
+
+import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class ApkDownloadArchiveTest {
+    @Test
+    fun extractsOneApkAndIgnoresOtherArtifactFiles() {
+        val archive = createZip(
+            "release-signature.txt" to "certificate details",
+            "outputs/phone/release/browser.apk" to "apk-content"
+        )
+        val destination = createTempDir(prefix = "apk-extract-")
+
+        val apk = ApkDownloadArchive.extractSingleApk(archive, destination)
+
+        assertEquals("browser.apk", apk.name)
+        assertEquals("apk-content", apk.readText())
+        assertTrue(archive.delete())
+        destination.deleteRecursively()
+    }
+
+    @Test(expected = IOException::class)
+    fun rejectsArchiveWithoutApk() {
+        val archive = createZip("readme.txt" to "not an apk")
+        ApkDownloadArchive.extractSingleApk(archive, createTempDir(prefix = "apk-empty-"))
+    }
+
+    @Test(expected = IOException::class)
+    fun rejectsArchiveWithMultipleApks() {
+        val archive = createZip("one.apk" to "one", "two.apk" to "two")
+        ApkDownloadArchive.extractSingleApk(archive, createTempDir(prefix = "apk-multiple-"))
+    }
+
+    private fun createZip(vararg entries: Pair<String, String>): File {
+        val file = File.createTempFile("browser-artifact-", ".zip")
+        ZipOutputStream(FileOutputStream(file)).use { output ->
+            entries.forEach { (name, content) ->
+                output.putNextEntry(ZipEntry(name))
+                output.write(content.toByteArray())
+                output.closeEntry()
+            }
+        }
+        return file
+    }
+}

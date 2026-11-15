@@ -1,9 +1,5 @@
 package com.search.browser
 
-import android.Manifest
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -31,9 +27,7 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
-import androidx.core.content.ContextCompat
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
@@ -67,7 +61,6 @@ class MainActivity : AppCompatActivity() {
     private val pendingPublicSaveIds = mutableSetOf<Int>()
     private var adBlockingEnabled = true
     private var showingDownloads = false
-    private var notificationPermissionRequested = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -82,7 +75,7 @@ class MainActivity : AppCompatActivity() {
             .takeIf { it.startsWith("https://") || it.startsWith("http://") } ?: HOME_URL
         lastRequestedUrl = lastSuccessfulUrl
         restoreSavedDownloads()
-        createDownloadNotificationChannel()
+        NotificationManagerCompat.from(this).cancel(DOWNLOAD_NOTIFICATION_ID)
         buildLayout()
 
         testCrashRenderer = BuildConfig.DEBUG &&
@@ -171,14 +164,15 @@ class MainActivity : AppCompatActivity() {
             ) {
                 val suggestedName = item.getSuggestedName().orEmpty()
                 val urlName = Uri.parse(item.getUrl().orEmpty()).lastPathSegment.orEmpty()
+                val mimeType = item.getMimeType().orEmpty()
                 val isApk = suggestedName.endsWith(".apk", true) ||
                     urlName.substringBefore("?").endsWith(".apk", true) ||
-                    item.getMimeType().orEmpty().equals(APK_MIME_TYPE, ignoreCase = true)
-                if (!isApk) {
+                    mimeType.equals(APK_MIME_TYPE, ignoreCase = true)
+                val isZip = suggestedName.endsWith(".zip", true) ||
+                    urlName.substringBefore("?").endsWith(".zip", true) ||
+                    mimeType.contains("zip", ignoreCase = true)
+                if (!isApk && !isZip) {
                     callback.cancel()
-                    runOnUiThread {
-                        Toast.makeText(this@MainActivity, "Only APK downloads are supported", Toast.LENGTH_LONG).show()
-                    }
                     return
                 }
 
@@ -187,20 +181,14 @@ class MainActivity : AppCompatActivity() {
                 }
                 if (alreadyDownloading) {
                     callback.cancel()
-                    runOnUiThread {
-                        Toast.makeText(this@MainActivity, "One APK download at a time", Toast.LENGTH_SHORT).show()
-                    }
                     return
                 }
 
-                val name = normalizedApkName(suggestedName.ifBlank { urlName })
+                val name = normalizedDownloadName(suggestedName.ifBlank { urlName }, isZip)
                 val stagingDirectory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
                     ?: File(filesDir, "downloads")
                 if (!stagingDirectory.exists() && !stagingDirectory.mkdirs()) {
                     callback.cancel()
-                    runOnUiThread {
-                        Toast.makeText(this@MainActivity, "Cannot prepare the download", Toast.LENGTH_LONG).show()
-                    }
                     return
                 }
 
@@ -213,7 +201,12 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onDownloadUpdated(item: CefriumBrowser.DownloadItem) {
-                val name = normalizedApkName(item.getSuggestedName().orEmpty())
+                val suggestedName = item.getSuggestedName().orEmpty()
+                val urlName = Uri.parse(item.getUrl().orEmpty()).lastPathSegment.orEmpty()
+                val isZip = suggestedName.endsWith(".zip", true) ||
+                    urlName.substringBefore("?").endsWith(".zip", true) ||
+                    item.getMimeType().orEmpty().contains("zip", ignoreCase = true)
+                val name = normalizedDownloadName(suggestedName.ifBlank { urlName }, isZip)
                 runOnUiThread {
                     activeDownloadItems[name] = item
                     updateDownloadRecord(
@@ -629,24 +622,55 @@ class MainActivity : AppCompatActivity() {
         return if (cleaned.endsWith(".apk", true)) cleaned else "$cleaned.apk"
     }
 
+    private fun normalizedDownloadName(value: String, isZip: Boolean): String {
+        val fallback = if (isZip) "download.zip" else "download.apk"
+        val cleaned = value.substringAfterLast('/').substringAfterLast('\\')
+            .replace(Regex("[\\\\/:*?\"<>|]"), "_")
+            .trim()
+            .ifBlank { fallback }
+        return when {
+            cleaned.endsWith(".apk", true) || cleaned.endsWith(".zip", true) -> cleaned
+            isZip -> "$cleaned.zip"
+            else -> "$cleaned.apk"
+        }
+    }
+
     private fun saveCompletedDownloadToPublicDownloads(record: DownloadRecord) {
         if (!pendingPublicSaveIds.add(record.id)) return
-        val source = record.path.takeIf { it.isNotBlank() }?.let(::File)
-        if (source == null || !source.isFile) {
+        val downloadedFile = record.path.takeIf { it.isNotBlank() }?.let(::File)
+        if (downloadedFile == null || !downloadedFile.isFile) {
             pendingPublicSaveIds.remove(record.id)
             record.interrupted = true
             record.complete = false
-            publishDownloadNotification(record)
             persistDownloads()
             if (showingDownloads) renderDownloads()
             return
         }
 
-        val displayName = normalizedApkName(record.name)
         Thread({
             var destinationUri: Uri? = null
+            var extractedApk: File? = null
+            var extractionDirectory: File? = null
             var failure: Throwable? = null
+            var displayName = normalizedApkName(record.name)
             try {
+                val apkSource = if (downloadedFile.extension.equals("zip", true) ||
+                    record.name.endsWith(".zip", true)
+                ) {
+                    extractionDirectory = File(cacheDir, "apk-download-${record.id}").apply {
+                        deleteRecursively()
+                        if (!mkdirs() && !isDirectory) {
+                            throw IllegalStateException("Unable to prepare the APK extraction folder")
+                        }
+                    }
+                    ApkDownloadArchive.extractSingleApk(downloadedFile, extractionDirectory!!).also {
+                        extractedApk = it
+                    }
+                } else {
+                    downloadedFile
+                }
+                displayName = normalizedApkName(apkSource.name)
+
                 val values = ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
                     put(MediaStore.MediaColumns.MIME_TYPE, APK_MIME_TYPE)
@@ -661,20 +685,23 @@ class MainActivity : AppCompatActivity() {
                 val output = contentResolver.openOutputStream(destinationUri!!, "w")
                     ?: throw IllegalStateException("Unable to open the Downloads file")
                 output.use { stream ->
-                    source.inputStream().use { input -> input.copyTo(stream) }
+                    apkSource.inputStream().use { input -> input.copyTo(stream) }
                 }
 
                 val ready = ContentValues().apply {
                     put(MediaStore.MediaColumns.IS_PENDING, 0)
                 }
                 contentResolver.update(destinationUri!!, ready, null, null)
-                if (source.exists() && !source.delete()) {
-                    Log.w(TAG, "Temporary APK could not be deleted: " + source.absolutePath)
+                if (downloadedFile.exists() && !downloadedFile.delete()) {
+                    Log.w(TAG, "Temporary download could not be deleted: " + downloadedFile.absolutePath)
                 }
+                extractedApk?.let { if (it.exists()) it.delete() }
             } catch (error: Throwable) {
                 failure = error
                 destinationUri?.let { runCatching { contentResolver.delete(it, null, null) } }
-                Log.e(TAG, "Unable to move APK into the public Downloads folder", error)
+                Log.e(TAG, "Unable to save the downloaded APK", error)
+            } finally {
+                extractionDirectory?.deleteRecursively()
             }
 
             val savedUri = destinationUri.takeIf { failure == null }
@@ -689,11 +716,6 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     record.complete = false
                     record.interrupted = true
-                    Toast.makeText(
-                        this,
-                        "APK download finished, but saving to Downloads failed",
-                        Toast.LENGTH_LONG
-                    ).show()
                 }
                 record.updatedAt = System.currentTimeMillis()
                 publishDownloadNotification(record)
@@ -718,97 +740,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun createDownloadNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                DOWNLOAD_CHANNEL_ID,
-                "Browser downloads",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply { description = "Download progress and completion" }
-            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-        }
-    }
-
     private fun publishDownloadNotification(record: DownloadRecord) {
-        if (record.canceled || record.interrupted) {
-            NotificationManagerCompat.from(this).cancel(DOWNLOAD_NOTIFICATION_ID)
-            return
-        }
-        if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
-            android.content.pm.PackageManager.PERMISSION_GRANTED
-        ) {
-            if (!notificationPermissionRequested) {
-                notificationPermissionRequested = true
-                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS)
-            }
-            return
-        }
-
-        val remaining = (record.totalBytes - record.receivedBytes).coerceAtLeast(0L)
-        val eta = if (!record.complete && record.speedBytesPerSecond > 0L && record.totalBytes > 0L) {
-            " · ${formatDuration(remaining / record.speedBytesPerSecond)} left"
-        } else ""
-        val status = if (record.complete) {
-            "APK ready to install · " + formatBytes(record.receivedBytes)
-        } else if (record.totalBytes > 0L) {
-            "${record.percent}% · ${formatBytes(record.receivedBytes)} of ${formatBytes(record.totalBytes)}$eta"
-        } else {
-            "Download started · ${formatBytes(record.receivedBytes)} received"
-        }
-        val openIntent = if (record.complete && record.path.startsWith("content://")) {
-            createApkInstallIntent(Uri.parse(record.path))
-        } else {
-            Intent(this, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            }
-        }
-        val pendingIntent = PendingIntent.getActivity(
-            this, DOWNLOAD_NOTIFICATION_ID, openIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val notification = NotificationCompat.Builder(this, DOWNLOAD_CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle(record.name)
-            .setContentText(status)
-            .setContentIntent(pendingIntent)
-            .setOnlyAlertOnce(true)
-            .setOngoing(!record.complete)
-            .setAutoCancel(
-                record.complete &&
-                    (Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
-                        packageManager.canRequestPackageInstalls())
-            )
-            .setProgress(100, record.percent.coerceIn(0, 100), !record.complete && record.totalBytes <= 0L)
-            .build()
-        runCatching { NotificationManagerCompat.from(this).notify(DOWNLOAD_NOTIFICATION_ID, notification) }
-            .onFailure { Log.w(TAG, "Unable to post download notification", it) }
-    }
-
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_NOTIFICATIONS &&
-            grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED
-        ) {
-            downloadRecords.values.filter { !it.canceled && !it.interrupted }
-                .forEach(::publishDownloadNotification)
-        }
-    }
-
-    private fun formatDuration(seconds: Long): String {
-        val safe = seconds.coerceAtLeast(0L)
-        val hours = safe / 3600L
-        val minutes = (safe % 3600L) / 60L
-        val secs = safe % 60L
-        return when {
-            hours > 0L -> "${hours}h ${minutes}m"
-            minutes > 0L -> "${minutes}m ${secs}s"
-            else -> "${secs}s"
-        }
+        // Downloads stay visible in the in-app Downloads panel; suppress Android pop-up notifications.
+        NotificationManagerCompat.from(this).cancel(DOWNLOAD_NOTIFICATION_ID)
     }
 
     private fun renderDownloads() {
@@ -1049,10 +983,8 @@ class MainActivity : AppCompatActivity() {
     private companion object {
         const val PREFERENCES = "browser_preferences"
         const val HOME_URL = "https://www.google.com/"
-        const val DOWNLOAD_CHANNEL_ID = "browser_downloads"
         const val DOWNLOAD_NOTIFICATION_ID = 4103
         const val APK_MIME_TYPE = "application/vnd.android.package-archive"
-        const val REQUEST_NOTIFICATIONS = 4102
         const val KEY_AD_BLOCK = "ad_block_enabled"
         const val KEY_DOWNLOADS = "downloads_json"
         const val KEY_BROWSER_STATE = "browser_state"
