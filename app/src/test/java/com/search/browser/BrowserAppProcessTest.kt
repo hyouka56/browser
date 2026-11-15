@@ -14,7 +14,7 @@ class BrowserAppProcessTest {
     fun chromiumSandboxedRendererProcessIsSkipped() {
         assertFalse(
             isMainApplicationProcess(
-                "com.search.browser:sandboxed_process0:com.cefrium.ChildServices$Sandboxed0:0",
+                "com.search.browser:sandboxed_process0:com.cefrium.ChildServices\$Sandboxed0:0",
                 "com.search.browser"
             )
         )
