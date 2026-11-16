@@ -124,7 +124,15 @@ if adb shell dumpsys window 2>/dev/null | grep -F "Application Not Responding" >
   fi
 fi
 
-# Test buttons fill two large fixed portions of the viewport to avoid layout-dependent taps.
+# The app must be resumed after renderer recovery while the download page is still visible.
+# This assertion belongs before the later intentional removal of the task stack.
+adb shell dumpsys activity activities > "$ARTIFACTS/activity-dump-before-task-removal.txt"
+if ! grep -E "mResumedActivity|topResumedActivity" "$ARTIFACTS/activity-dump-before-task-removal.txt" | grep -F "$PACKAGE" >/dev/null; then
+  echo "Browser is not the resumed Activity after renderer recovery and before task removal." >&2
+  exit 1
+fi
+
+# Test buttons fill large fixed portions of the viewport.
 adb shell input tap 540 600
 wait_for_log "DOWNLOAD_BEFORE_CALLBACK id=" 1 60
 wait_for_log "DOWNLOAD_REQUEST_ACCEPTED name=download-test.txt" 1 60
@@ -164,8 +172,13 @@ fi
 
 # Start a delayed debug download, then remove the Activity task while the
 # transfer is pending. The foreground service must keep Cefrium alive until
-# the file is copied into the public Downloads directory.
-adb shell input tap 540 1900
+# the file is copied into the public Downloads directory. The API35 emulator
+# has a taller WebView viewport, placing the 90vh button lower on screen.
+if (( EXPECTED_API >= 35 )); then
+  adb shell input tap 540 2025
+else
+  adb shell input tap 540 1900
+fi
 wait_for_log "DOWNLOAD_BACKGROUND_ALLOW_DELAYED" 1 30
 wait_for_log "DOWNLOAD_KEEP_ALIVE_SERVICE_STARTED" 1 30
 wait_for_log "DOWNLOAD_KEEP_ALIVE_REQUESTED" 1 30
@@ -231,8 +244,11 @@ if [[ -z "$APP_PID" ]]; then
 fi
 
 adb shell dumpsys activity activities > "$ARTIFACTS/activity-dump-after-test.txt"
-if ! grep -E "mResumedActivity|topResumedActivity" "$ARTIFACTS/activity-dump-after-test.txt" | grep -F "$PACKAGE" >/dev/null; then
-  echo "Browser is not the resumed Activity after renderer recovery." >&2
+# No resumed Browser Activity is expected here: the test deliberately removed
+# its task. The app process must nevertheless remain alive until the transfer
+# and public Downloads copy have finished.
+if [[ -z "$(adb shell pidof "$PACKAGE" | tr -d '\r')" ]]; then
+  echo "Browser process exited before the background download assertions completed." >&2
   exit 1
 fi
 
