@@ -182,9 +182,9 @@ fi
 wait_for_log "DOWNLOAD_BACKGROUND_ALLOW_DELAYED" 1 30
 wait_for_log "DOWNLOAD_KEEP_ALIVE_SERVICE_STARTED" 1 30
 wait_for_log "DOWNLOAD_KEEP_ALIVE_REQUESTED" 1 30
-STACK_ID="$(adb shell dumpsys activity activities | grep -F "$PACKAGE" | grep -E 'StackId=[0-9]+' | sed -E 's/.*StackId=([0-9]+).*/\1/' | head -n1 | tr -d '\r')"
+STACK_ID="$(adb shell dumpsys activity activities | grep -F "$PACKAGE" | sed -nE 's/.*StackId=([0-9]+).*/\1/p; s/.*Task\{[^#]*#([0-9]+).*/\1/p' | head -n1 | tr -d '\r')"
 if [[ -z "$STACK_ID" ]]; then
-  echo "Could not determine the Browser stack ID for the close-app download test." >&2
+  echo "Could not determine the Browser stack/task ID for the close-app download test." >&2
   adb shell dumpsys activity activities >&2 || true
   exit 1
 fi
