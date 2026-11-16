@@ -109,14 +109,11 @@ adb shell input tap 540 600
 wait_for_log "DOWNLOAD_BEFORE_CALLBACK id=" 1 60
 wait_for_log "DOWNLOAD_REQUEST_ACCEPTED name=download-test.txt" 1 60
 wait_for_log "DOWNLOAD_FILE_SAVED name=download-test.txt" 1 90
-adb shell content query \
-  --uri content://media/external/downloads \
-  --where "_display_name='download-test.txt'" \
-  --projection _display_name:_size \
-  > "$ARTIFACTS/media-download-test.txt.txt"
-if ! grep -F "download-test.txt" "$ARTIFACTS/media-download-test.txt.txt" >/dev/null; then
-  echo "Downloaded text file was not found in the public Downloads collection." >&2
-  cat "$ARTIFACTS/media-download-test.txt.txt" >&2
+TEXT_DOWNLOAD_FILE="/sdcard/Download/download-test.txt"
+adb shell ls -l "$TEXT_DOWNLOAD_FILE" > "$ARTIFACTS/media-download-test.txt.txt" 2>&1 || true
+if ! adb shell test -s "$TEXT_DOWNLOAD_FILE"; then
+  echo "Downloaded text file was not found in public Downloads or is empty." >&2
+  adb shell ls -la /sdcard/Download >&2 || true
   exit 1
 fi
 adb shell dumpsys notification --noredact > "$ARTIFACTS/notification-download-test.txt.txt"
@@ -128,14 +125,11 @@ fi
 adb shell input tap 540 1500
 wait_for_log "DOWNLOAD_REQUEST_ACCEPTED name=download-test.apk" 1 60
 wait_for_log "DOWNLOAD_FILE_SAVED name=download-test.apk" 1 90
-adb shell content query \
-  --uri content://media/external/downloads \
-  --where "_display_name='download-test.apk'" \
-  --projection _display_name:_size \
-  > "$ARTIFACTS/media-download-test.apk.txt"
-if ! grep -F "download-test.apk" "$ARTIFACTS/media-download-test.apk.txt" >/dev/null; then
-  echo "Downloaded APK test file was not found in the public Downloads collection." >&2
-  cat "$ARTIFACTS/media-download-test.apk.txt" >&2
+APK_DOWNLOAD_FILE="/sdcard/Download/download-test.apk"
+adb shell ls -l "$APK_DOWNLOAD_FILE" > "$ARTIFACTS/media-download-test.apk.txt" 2>&1 || true
+if ! adb shell test -s "$APK_DOWNLOAD_FILE"; then
+  echo "Downloaded APK fixture was not found in public Downloads or is empty." >&2
+  adb shell ls -la /sdcard/Download >&2 || true
   exit 1
 fi
 adb shell dumpsys notification --noredact > "$ARTIFACTS/notification-download-test.apk.txt"
