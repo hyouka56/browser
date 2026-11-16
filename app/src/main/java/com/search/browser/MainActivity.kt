@@ -125,25 +125,9 @@ class MainActivity : AppCompatActivity() {
     private fun attachBrowser(initialUrl: String, savedState: Bundle? = null) {
         val instance = CefriumBrowser.createWithSurface(this)
         browser = instance
+        // Keep the browser surface black while allowing each website to use its own theme.
         instance.setBackgroundColor(Color.BLACK)
-        instance.addDocumentStartJavaScript(
-            """
-            (() => {
-                const stylesheet = new CSSStyleSheet();
-                stylesheet.replaceSync(`
-                    :root, html, body {
-                        background: #000000 !important;
-                        color-scheme: dark !important;
-                    }
-                    body {
-                        min-height: 100vh;
-                    }
-                `);
-                document.adoptedStyleSheets = [...document.adoptedStyleSheets, stylesheet];
-            })();
-            """.trimIndent(),
-            setOf("*")
-        )
+        instance.setDarkMode(false)
         if (BuildConfig.DEBUG && intent.getBooleanExtra(EXTRA_TEST_DOWNLOAD_PAGE, false)) {
             instance.addDocumentStartJavaScript(
                 """
@@ -206,6 +190,7 @@ class MainActivity : AppCompatActivity() {
             )
         }
         instance.setAdBlockEnabled(adBlockingEnabled)
+        Log.i(TAG, "AD_BLOCK_CONFIG enabled=$adBlockingEnabled")
         browserSlot.addView(
             instance.getSurfaceContainer(),
             FrameLayout.LayoutParams(
@@ -237,7 +222,8 @@ class MainActivity : AppCompatActivity() {
                     "PAGE_LOAD_STATE loading=$isLoading canGoBack=$canGoBack canGoForward=$canGoForward"
                 )
                 if (!isLoading) {
-                    instance.setDarkMode(true)
+                    updateShieldButton()
+                    Log.i(TAG, "AD_BLOCK_PAGE_STATS enabled=$adBlockingEnabled blockedRequests=${instance.getBlockedCount()}")
                     if (::swipeRefresh.isInitialized) swipeRefresh.isRefreshing = false
                     val pageUrl = instance.getUrl().orEmpty().ifBlank { lastRequestedUrl }
                     if (pageUrl.startsWith("https://") || pageUrl.startsWith("http://")) {
@@ -745,7 +731,12 @@ class MainActivity : AppCompatActivity() {
     private fun updateShieldButton() {
         if (!::shieldButton.isInitialized) return
         shieldButton.alpha = if (adBlockingEnabled) 1f else 0.45f
-        shieldButton.contentDescription = if (adBlockingEnabled) "Ad blocker on" else "Ad blocker off"
+        val blockedCount = if (::browser.isInitialized) browser.getBlockedCount() else 0
+        shieldButton.contentDescription = if (adBlockingEnabled) {
+            "Ad blocker on, $blockedCount requests blocked"
+        } else {
+            "Ad blocker off"
+        }
     }
 
     private fun toggleDownloads() {
@@ -819,6 +810,7 @@ class MainActivity : AppCompatActivity() {
         if (record.complete || record.canceled || record.interrupted) {
             activeDownloadItems.remove(downloadId)
         }
+        if (record.canceled) deleteCanceledPartialDownload(record)
         if (record.complete && !record.path.startsWith("content://")) {
             persistDownloads()
             if (showingDownloads) renderDownloads()
@@ -993,17 +985,19 @@ class MainActivity : AppCompatActivity() {
         val manager = NotificationManagerCompat.from(this)
         if (!manager.areNotificationsEnabled()) return
 
-        val ongoing = !record.complete && !record.canceled && !record.interrupted
+        val ongoing = !record.complete && !record.canceled && !record.interrupted && !record.paused
         val title = when {
             record.complete -> "Download complete"
             record.canceled -> "Download canceled"
             record.interrupted -> "Download failed"
+            record.paused -> "Download paused"
             else -> "Downloading ${record.name}"
         }
         val detail = when {
             record.complete -> "${record.name} saved to Downloads"
             record.canceled -> record.name
             record.interrupted -> "${record.name} could not be saved"
+            record.paused -> "${record.name} · ${record.percent}% paused"
             record.totalBytes > 0L -> "${record.percent}% · ${formatBytes(record.receivedBytes)} of ${formatBytes(record.totalBytes)}"
             record.receivedBytes > 0L -> "${formatBytes(record.receivedBytes)} downloaded"
             else -> "Preparing ${record.name}"
@@ -1108,10 +1102,130 @@ class MainActivity : AppCompatActivity() {
             card.setOnClickListener { openDownloadedFile(record) }
         }
 
+        if (!record.complete && !record.canceled && !record.interrupted) {
+            val actions = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val primaryLabel = if (record.paused) "Resume" else "Pause"
+            val primaryAction: () -> Unit = if (record.paused) {
+                { resumeDownload(record) }
+            } else {
+                { pauseDownload(record) }
+            }
+            actions.addView(
+                downloadActionButton(primaryLabel, Color.rgb(48, 48, 48), primaryAction),
+                LinearLayout.LayoutParams(0, dp(42), 1f)
+            )
+            actions.addView(
+                downloadActionButton("Cancel", Color.rgb(74, 36, 36)) { cancelDownload(record) },
+                LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(9) }
+            )
+            card.addView(actions, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(42)
+            ).apply { topMargin = dp(12) })
+        }
+
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 0, 0, dp(10))
             addView(card)
+        }
+    }
+
+    private fun downloadActionButton(
+        label: String,
+        backgroundColor: Int,
+        action: () -> Unit
+    ): TextView = textView(label, 12f, Color.WHITE, bold = true).apply {
+        gravity = Gravity.CENTER
+        setPadding(dp(12), dp(8), dp(12), dp(8))
+        background = roundedBackground(backgroundColor, dp(10))
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { action() }
+    }
+
+    private fun findLiveDownload(record: DownloadRecord): CefriumBrowser.DownloadItem? =
+        activeDownloadItems[record.id] ?: record.liveItem
+
+    private fun pauseDownload(record: DownloadRecord) {
+        val item = findLiveDownload(record)
+        if (item == null || record.complete || record.canceled || record.interrupted) {
+            Toast.makeText(this, "This download can no longer be paused", Toast.LENGTH_SHORT).show()
+            return
+        }
+        runCatching { item.pause() }
+            .onSuccess {
+                record.paused = true
+                record.speedBytesPerSecond = 0L
+                record.updatedAt = System.currentTimeMillis()
+                publishDownloadNotification(record)
+                persistDownloads()
+                if (showingDownloads) renderDownloads()
+                Log.i(TAG, "DOWNLOAD_PAUSE_REQUESTED id=${record.id} name=${record.name}")
+            }
+            .onFailure {
+                Log.e(TAG, "Unable to pause download id=${record.id}", it)
+                Toast.makeText(this, "Unable to pause download", Toast.LENGTH_SHORT).show()
+            }
+    }
+
+    private fun resumeDownload(record: DownloadRecord) {
+        val item = findLiveDownload(record)
+        if (item == null || !record.paused || record.complete || record.canceled || record.interrupted) {
+            Toast.makeText(this, "This download cannot be resumed", Toast.LENGTH_SHORT).show()
+            return
+        }
+        runCatching { item.resume() }
+            .onSuccess {
+                record.paused = false
+                record.updatedAt = System.currentTimeMillis()
+                publishDownloadNotification(record)
+                persistDownloads()
+                if (showingDownloads) renderDownloads()
+                Log.i(TAG, "DOWNLOAD_RESUME_REQUESTED id=${record.id} name=${record.name}")
+            }
+            .onFailure {
+                Log.e(TAG, "Unable to resume download id=${record.id}", it)
+                Toast.makeText(this, "Unable to resume download", Toast.LENGTH_SHORT).show()
+            }
+    }
+
+    private fun cancelDownload(record: DownloadRecord) {
+        val item = findLiveDownload(record)
+        if (item == null || record.complete || record.canceled || record.interrupted) {
+            Toast.makeText(this, "This download can no longer be canceled", Toast.LENGTH_SHORT).show()
+            return
+        }
+        runCatching { item.cancel() }
+            .onSuccess {
+                record.canceled = true
+                record.paused = false
+                record.speedBytesPerSecond = 0L
+                record.updatedAt = System.currentTimeMillis()
+                publishDownloadNotification(record)
+                persistDownloads()
+                if (showingDownloads) renderDownloads()
+                Log.i(TAG, "DOWNLOAD_CANCEL_REQUESTED id=${record.id} name=${record.name}")
+            }
+            .onFailure {
+                Log.e(TAG, "Unable to cancel download id=${record.id}", it)
+                Toast.makeText(this, "Unable to cancel download", Toast.LENGTH_SHORT).show()
+            }
+    }
+
+    private fun deleteCanceledPartialDownload(record: DownloadRecord) {
+        val path = record.path.takeIf { it.isNotBlank() && !it.startsWith("content://") } ?: return
+        val partialFile = File(path)
+        if (!partialFile.name.startsWith("${record.id}-")) return
+        val stagingDirectory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+            ?: File(filesDir, "downloads")
+        val isOwnedStagingFile = runCatching {
+            partialFile.canonicalFile.parentFile == stagingDirectory.canonicalFile
+        }.getOrDefault(false)
+        if (isOwnedStagingFile && partialFile.exists() && !partialFile.delete()) {
+            Log.w(TAG, "Unable to delete canceled partial download: ${partialFile.absolutePath}")
         }
     }
 

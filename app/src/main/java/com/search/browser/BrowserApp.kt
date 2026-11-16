@@ -24,6 +24,11 @@ class BrowserApp : Application() {
             Cefrium.downloadAndLoadEasyList(this) { ruleCount, error ->
                 if (error != null) Log.w(TAG, "EasyList refresh failed: $error")
                 else Log.i(TAG, "EasyList loaded: $ruleCount rules")
+                // YouTube's ad endpoints are covered by separate Cefrium heuristics.
+                runCatching {
+                    Cefrium.loadYouTubeAdRules()
+                    Log.i(TAG, "YouTube ad rules loaded")
+                }.onFailure { Log.w(TAG, "Could not load YouTube ad rules", it) }
             }
         }.onFailure { Log.e(TAG, "Could not start EasyList", it) }
     }
