@@ -53,6 +53,14 @@ import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
+    private data class BrowserWindow(
+        val id: Int,
+        var browser: CefriumBrowser,
+        var title: String,
+        var url: String,
+        val incognito: Boolean
+    )
+
     private lateinit var browser: CefriumBrowser
     private lateinit var browserSlot: FrameLayout
     private lateinit var swipeRefresh: SwipeRefreshLayout
@@ -63,6 +71,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var shieldButton: ImageButton
     private lateinit var rendererErrorPanel: FrameLayout
     private lateinit var defaultBrowserButton: TextView
+    private lateinit var windowsButton: TextView
+
+    private val browserWindows = mutableListOf<BrowserWindow>()
+    private val downloadBrowserOwners = LinkedHashMap<Int, CefriumBrowser>()
+    private val privateDownloadIds = mutableSetOf<Int>()
+    private var activeWindowId = -1
+    private var nextWindowId = 1
+    private var browserToCloseAfterDownload: CefriumBrowser? = null
 
     private var rendererRecoveryAttempts = 0
     private var rendererRecoveryPending = false
@@ -87,7 +103,8 @@ class MainActivity : AppCompatActivity() {
     ) { granted ->
         notificationPermissionRequested = false
         if (granted) {
-            downloadRecords.values.maxByOrNull { it.updatedAt }
+            downloadRecords.values.filterNot { privateDownloadIds.contains(it.id) }
+                .maxByOrNull { it.updatedAt }
                 ?.takeIf { it.path.startsWith("content://") || it.canceled || it.interrupted }
                 ?.let(::publishDownloadNotification)
         }
@@ -130,13 +147,33 @@ class MainActivity : AppCompatActivity() {
         renderDownloads()
     }
 
-    private fun attachBrowser(initialUrl: String, savedState: Bundle? = null) {
-        val instance = CefriumBrowser.createWithSurface(this)
+    private fun attachBrowser(
+        initialUrl: String,
+        savedState: Bundle? = null,
+        incognito: Boolean = false,
+        replaceWindowId: Int? = null
+    ) {
+        val instance = CefriumBrowser.createWithSurface(this, incognito)
+        val windowId = replaceWindowId ?: nextWindowId++
+        val window = browserWindows.firstOrNull { it.id == windowId }?.also {
+            it.browser = instance
+            it.title = "New tab"
+            it.url = initialUrl
+        } ?: BrowserWindow(windowId, instance, "New tab", initialUrl, incognito).also {
+            browserWindows.add(it)
+        }
+        activeWindowId = windowId
         browser = instance
+        lastRequestedUrl = initialUrl
+        searchField.hint = if (incognito) "Incognito browsing" else "Search or enter address"
+        searchField.setText(initialUrl)
+        browserSlot.removeAllViews()
+        updateWindowsButton()
         // Prefer each site's native dark theme, then correct light surfaces and low-contrast
         // text at document start. The fallback changes colours only, never page geometry.
         instance.setBackgroundColor(Color.BLACK)
         instance.setDarkMode(true)
+        instance.setPageVisible(true)
         runCatching {
             val darkModeScript = assets.open("browser-dark-mode.js").bufferedReader().use { it.readText() }
             instance.addDocumentStartJavaScript(darkModeScript, setOf("*"))
@@ -224,15 +261,22 @@ class MainActivity : AppCompatActivity() {
 
         instance.setCallback(object : CefriumBrowser.Callback() {
             override fun onUrlChanged(url: String) {
-                lastRequestedUrl = url
-                runOnUiThread {
-                    if (!searchField.hasFocus()) searchField.setText(url)
+                window.url = url
+                if (activeWindowId == windowId) {
+                    lastRequestedUrl = url
+                    runOnUiThread {
+                        if (activeWindowId == windowId && !searchField.hasFocus()) {
+                            searchField.setText(url)
+                        }
+                    }
                 }
-                Log.i(TAG, "PAGE_URL_CHANGED url=$url")
+                Log.i(TAG, "PAGE_URL_CHANGED window=$windowId incognito=${window.incognito} url=${if (window.incognito) "<private>" else url}")
             }
 
             override fun onTitleChanged(title: String) {
-                Log.i(TAG, "PAGE_TITLE title=$title")
+                window.title = title.ifBlank { "New tab" }
+                runOnUiThread { if (activeWindowId == windowId) updateWindowsButton() }
+                Log.i(TAG, "PAGE_TITLE window=$windowId title=${if (window.incognito) "<private>" else title}")
             }
 
             override fun onLoadingStateChanged(
@@ -245,36 +289,30 @@ class MainActivity : AppCompatActivity() {
                     "PAGE_LOAD_STATE loading=$isLoading canGoBack=$canGoBack canGoForward=$canGoForward"
                 )
                 if (!isLoading) {
-                    updateShieldButton()
-                    Log.i(TAG, "AD_BLOCK_PAGE_STATS enabled=$adBlockingEnabled blockedRequests=${instance.getBlockedCount()}")
-                    if (::swipeRefresh.isInitialized) swipeRefresh.isRefreshing = false
-                    val pageUrl = instance.getUrl().orEmpty().ifBlank { lastRequestedUrl }
-                    if (pageUrl.startsWith("https://") || pageUrl.startsWith("http://")) {
-                        browserSlot.post {
-                            if (::browser.isInitialized && browser === instance) {
-                                runCatching {
-                                    instance.evaluateJavaScript(
-                                        "({installed: window.__searchBrowserDarkModeV1 === true, " +
-                                            "colorScheme: getComputedStyle(document.documentElement).colorScheme})"
-                                    ) { result ->
-                                        Log.i(TAG, "DARK_MODE_VERIFICATION url=$pageUrl result=$result")
-                                    }
-                                }.onFailure {
-                                    Log.w(TAG, "DARK_MODE_VERIFICATION_FAILED url=$pageUrl", it)
-                                }
-                            }
-                        }
-                        lastSuccessfulUrl = pageUrl
-                        preferences.edit().putString(KEY_LAST_URL, pageUrl).apply()
-                        if (rendererRecoveryPending) {
-                            rendererRecoveryPending = false
-                            Log.i(TAG, "CHROMIUM_RECOVERY_COMPLETED url=$pageUrl")
-                        }
-                        scheduleRendererCrashTest(instance, pageUrl)
+                    val isActiveWindow = activeWindowId == windowId
+                    if (isActiveWindow) {
+                        updateShieldButton()
+                        if (::swipeRefresh.isInitialized) swipeRefresh.isRefreshing = false
                     }
-                    browserSlot.postDelayed({
-                        captureAndVerifyPage(instance, pageUrl)
-                    }, 1000L)
+                    Log.i(TAG, "AD_BLOCK_PAGE_STATS window=$windowId enabled=$adBlockingEnabled blockedRequests=${instance.getBlockedCount()}")
+                    val pageUrl = instance.getUrl().orEmpty().ifBlank { window.url }
+                    window.url = pageUrl
+                    if (pageUrl.startsWith("https://") || pageUrl.startsWith("http://")) {
+                        if (!window.incognito && isActiveWindow) {
+                            lastSuccessfulUrl = pageUrl
+                            preferences.edit().putString(KEY_LAST_URL, pageUrl).apply()
+                        }
+                        if (isActiveWindow) {
+                            if (rendererRecoveryPending) {
+                                rendererRecoveryPending = false
+                                Log.i(TAG, "CHROMIUM_RECOVERY_COMPLETED url=$pageUrl")
+                            }
+                            scheduleRendererCrashTest(instance, pageUrl)
+                        }
+                    }
+                    if (BuildConfig.DEBUG && isActiveWindow && !window.incognito) {
+                        browserSlot.postDelayed({ captureAndVerifyPage(instance, pageUrl) }, 1000L)
+                    }
                 }
             }
         })
@@ -293,8 +331,8 @@ class MainActivity : AppCompatActivity() {
             ) {
                 Log.i(
                     TAG,
-                    "DOWNLOAD_BEFORE_CALLBACK id=${item.getId()} suggested=${item.getSuggestedName()} " +
-                        "url=${item.getUrl()} mimeType=${item.getMimeType()}"
+                    "DOWNLOAD_BEFORE_CALLBACK id=${item.getId()} suggested=${if (window.incognito) "<private>" else item.getSuggestedName()} " +
+                        "url=${if (window.incognito) "<private>" else item.getUrl()} mimeType=${item.getMimeType()}"
                 )
                 val suggestedName = item.getSuggestedName().orEmpty()
                 val urlName = Uri.parse(item.getUrl().orEmpty()).lastPathSegment.orEmpty()
@@ -309,7 +347,7 @@ class MainActivity : AppCompatActivity() {
                 if (otherActiveDownload != null) {
                     Log.w(
                         TAG,
-                        "DOWNLOAD_REQUEST_REJECTED id=$downloadId name=$name " +
+                        "DOWNLOAD_REQUEST_REJECTED id=$downloadId name=${if (window.incognito) "<private>" else name} " +
                             "reason=another_download_active activeId=${otherActiveDownload.key}"
                     )
                     callback.cancel()
@@ -318,7 +356,7 @@ class MainActivity : AppCompatActivity() {
                 val stagingDirectory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
                     ?: File(filesDir, "downloads")
                 if (!stagingDirectory.exists() && !stagingDirectory.mkdirs()) {
-                    Log.e(TAG, "DOWNLOAD_REQUEST_REJECTED id=$downloadId name=$name reason=staging_directory_unavailable")
+                    Log.e(TAG, "DOWNLOAD_REQUEST_REJECTED id=$downloadId name=${if (window.incognito) "<private>" else name} reason=staging_directory_unavailable")
                     callback.cancel()
                     return
                 }
@@ -326,18 +364,22 @@ class MainActivity : AppCompatActivity() {
                 val target = File(stagingDirectory, "$downloadId-$name")
                 target.delete()
                 activeDownloadItems[downloadId] = item
+                downloadBrowserOwners[downloadId] = instance
+                if (window.incognito) privateDownloadIds.add(downloadId)
                 downloadSuggestedNames[downloadId] = name
-                if (!startDownloadKeepAliveService(name)) {
+                if (!startDownloadKeepAliveService(name, privateMode = window.incognito)) {
                     activeDownloadItems.remove(downloadId)
+                    downloadBrowserOwners.remove(downloadId)
+                    privateDownloadIds.remove(downloadId)
                     downloadSuggestedNames.remove(downloadId)
-                    Log.e(TAG, "DOWNLOAD_REQUEST_REJECTED id=$downloadId name=$name reason=background_service_unavailable")
+                    Log.e(TAG, "DOWNLOAD_REQUEST_REJECTED id=$downloadId name=${if (window.incognito) "<private>" else name} reason=background_service_unavailable")
                     callback.cancel()
                     runOnUiThread {
                         Toast.makeText(this@MainActivity, "Unable to keep this download running in the background", Toast.LENGTH_LONG).show()
                     }
                     return
                 }
-                downloadRecords[downloadId]?.let { record ->
+                if (!window.incognito) downloadRecords[downloadId]?.let { record ->
                     record.name = name
                     record.url = item.getUrl().orEmpty()
                     record.mimeType = DownloadFileSupport.mimeTypeFor(name, mimeType)
@@ -346,7 +388,7 @@ class MainActivity : AppCompatActivity() {
                     persistDownloads()
                     if (showingDownloads) renderDownloads()
                 }
-                Log.i(TAG, "DOWNLOAD_REQUEST_ACCEPTED name=$name id=$downloadId mimeType=${DownloadFileSupport.mimeTypeFor(name, mimeType)} target=${target.absolutePath}")
+                Log.i(TAG, "DOWNLOAD_REQUEST_ACCEPTED name=${if (window.incognito) "Private download" else name} id=$downloadId mimeType=${DownloadFileSupport.mimeTypeFor(name, mimeType)} target=${if (window.incognito) "<private>" else target.absolutePath}")
                 if (BuildConfig.DEBUG && name == BACKGROUND_DOWNLOAD_TEST_FILE) {
                     Log.i(TAG, "DOWNLOAD_BACKGROUND_ALLOW_DELAYED id=$downloadId delayMs=$BACKGROUND_DOWNLOAD_TEST_DELAY_MS")
                     Handler(Looper.getMainLooper()).postDelayed({
@@ -373,9 +415,9 @@ class MainActivity : AppCompatActivity() {
                     if (item.isComplete() || item.isCanceled() || item.isInterrupted()) {
                         Log.i(
                             TAG,
-                            "DOWNLOAD_ITEM_TERMINAL id=$downloadId name=$name complete=${item.isComplete()} " +
+                            "DOWNLOAD_ITEM_TERMINAL id=$downloadId name=${if (window.incognito) "<private>" else name} complete=${item.isComplete()} " +
                                 "canceled=${item.isCanceled()} interrupted=${item.isInterrupted()} " +
-                                "reason=${item.getInterruptReason()} path=$path"
+                                "reason=${item.getInterruptReason()} path=${if (window.incognito) "<private>" else path}"
                         )
                     }
                     updateDownloadRecord(
@@ -393,28 +435,29 @@ class MainActivity : AppCompatActivity() {
         })
         Log.i(TAG, "DOWNLOAD_HANDLER_REGISTERED")
 
-        if (savedState != null && initialUrl == lastSuccessfulUrl) {
+        if (!incognito && savedState != null && initialUrl == lastSuccessfulUrl) {
             instance.restoreState(savedState)
         } else {
             instance.loadUrl(initialUrl)
         }
         Log.i(
             TAG,
-            "CEF_BROWSER_CREATED url=$initialUrl activeRenderers=" +
+            "CEF_BROWSER_CREATED url=${if (incognito) "<private>" else initialUrl} incognito=$incognito activeRenderers=" +
                 CefriumBrowser.activeRenderProcessCount()
         )
     }
 
-    private fun startDownloadKeepAliveService(name: String): Boolean {
+    private fun startDownloadKeepAliveService(name: String, privateMode: Boolean = false): Boolean {
         return runCatching {
-            val started = DownloadKeepAliveService.start(this, name)
+            val displayName = if (privateMode) "Private download in progress" else name
+            val started = DownloadKeepAliveService.start(this, displayName)
             if (started) {
                 downloadKeepAliveStarted = true
-                Log.i(TAG, "DOWNLOAD_KEEP_ALIVE_REQUESTED name=$name")
+                Log.i(TAG, "DOWNLOAD_KEEP_ALIVE_REQUESTED name=$displayName")
             }
             started
         }.onFailure {
-            Log.e(TAG, "DOWNLOAD_KEEP_ALIVE_START_FAILED name=$name", it)
+            Log.e(TAG, "DOWNLOAD_KEEP_ALIVE_START_FAILED name=$displayName", it)
         }.getOrDefault(false)
     }
 
@@ -431,13 +474,16 @@ class MainActivity : AppCompatActivity() {
             Log.i(TAG, "DOWNLOAD_KEEP_ALIVE_RELEASED")
         }
 
-        if (activityDestroying && browserCloseDeferredForDownload && ::browser.isInitialized) {
+        if (activityDestroying && browserCloseDeferredForDownload) {
             DownloadKeepAliveService.releaseBrowser(this)
-            runCatching { browser.close() }
+            val retained = browserToCloseAfterDownload
+            runCatching { retained?.let { if (!it.isClosed()) it.close() } }
                 .onFailure { Log.e(TAG, "BROWSER_CLOSE_AFTER_DOWNLOAD_FAILED", it) }
+            browserToCloseAfterDownload = null
             browserCloseDeferredForDownload = false
             Log.i(TAG, "BROWSER_CLOSED_AFTER_DOWNLOAD")
         }
+        if (!activityDestroying) downloadBrowserOwners.clear()
     }
 
     private fun handleRendererTermination(
@@ -449,10 +495,11 @@ class MainActivity : AppCompatActivity() {
             !::browser.isInitialized || browser !== failedBrowser
         ) return
 
+        val failedWindow = browserWindows.firstOrNull { it.id == activeWindowId }
         Log.e(
             TAG,
             "CHROMIUM_RENDERER_TERMINATED status=$status errorCode=$errorCode " +
-                "url=$lastRequestedUrl activeRenderers=" +
+                "url=${if (failedWindow?.incognito == true) "<private>" else lastRequestedUrl} activeRenderers=" +
                 CefriumBrowser.activeRenderProcessCount()
         )
 
@@ -463,7 +510,8 @@ class MainActivity : AppCompatActivity() {
 
         rendererRecoveryAttempts++
         rendererRecoveryPending = true
-        val restoreUrl = lastSuccessfulUrl
+        val currentWindow = browserWindows.firstOrNull { it.id == activeWindowId }
+        val restoreUrl = (if (currentWindow?.incognito == true) currentWindow.url else lastSuccessfulUrl)
             .takeIf { it.startsWith("https://") || it.startsWith("http://") }
             ?: "about:blank"
 
@@ -472,8 +520,8 @@ class MainActivity : AppCompatActivity() {
         browserSlot.removeAllViews()
         rendererErrorPanel.visibility = View.GONE
 
-        Log.i(TAG, "CHROMIUM_RECOVERY_STARTED restoreUrl=$restoreUrl")
-        attachBrowser(restoreUrl)
+        Log.i(TAG, "CHROMIUM_RECOVERY_STARTED restoreUrl=${if (currentWindow?.incognito == true) "<private>" else restoreUrl}")
+        attachBrowser(restoreUrl, incognito = currentWindow?.incognito == true, replaceWindowId = currentWindow?.id)
     }
 
     private fun captureAndVerifyPage(instance: CefriumBrowser, url: String) {
@@ -696,6 +744,16 @@ class MainActivity : AppCompatActivity() {
             marginStart = dp(8)
         })
 
+        windowsButton = textView("1", 16f, Color.WHITE, bold = true).apply {
+            gravity = Gravity.CENTER
+            contentDescription = "Show all windows"
+            background = roundedBackground(Color.rgb(17, 17, 17), dp(15))
+            setOnClickListener { showWindowsDialog() }
+        }
+        bar.addView(windowsButton, LinearLayout.LayoutParams(dp(46), dp(54)).apply {
+            marginStart = dp(6)
+        })
+
         defaultBrowserButton = textView("⋮", 26f, Color.WHITE, bold = true).apply {
             gravity = Gravity.CENTER
             contentDescription = "Browser options"
@@ -740,6 +798,112 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun updateWindowsButton() {
+        if (!::windowsButton.isInitialized) return
+        windowsButton.text = browserWindows.size.toString()
+        val active = browserWindows.firstOrNull { it.id == activeWindowId }
+        windowsButton.contentDescription = if (active?.incognito == true) {
+            "${browserWindows.size} windows, incognito active"
+        } else {
+            "${browserWindows.size} windows"
+        }
+    }
+
+    private fun showWindowsDialog() {
+        if (browserWindows.isEmpty()) return
+        val windows = browserWindows.toList()
+        val labels = windows.map { item ->
+            val activeMark = if (item.id == activeWindowId) "● " else ""
+            val mode = if (item.incognito) "Incognito · " else ""
+            val subtitle = if (item.incognito) "Private window" else item.url
+            "$activeMark$mode${item.title.ifBlank { "New tab" }}\n$subtitle"
+        }.toTypedArray()
+
+        AlertDialog.Builder(this)
+            .setTitle("All windows (${windows.size})")
+            .setItems(labels) { _, index -> switchWindow(windows[index].id) }
+            .setPositiveButton("New window") { _, _ -> createNewWindow(incognito = false) }
+            .setNeutralButton("New incognito") { _, _ -> createNewWindow(incognito = true) }
+            .setNegativeButton("Close current") { _, _ -> closeWindow(activeWindowId) }
+            .show()
+    }
+
+    private fun hasActiveDownloadForBrowser(target: CefriumBrowser): Boolean =
+        downloadBrowserOwners.any { (id, owner) ->
+            owner === target && (activeDownloadItems.containsKey(id) || pendingPublicSaveIds.contains(id))
+        }
+
+    private fun createNewWindow(incognito: Boolean) {
+        showBrowser()
+        if (::browser.isInitialized && !hasActiveDownloadForBrowser(browser)) browser.onPause()
+        browserSlot.removeAllViews()
+        rendererErrorPanel.visibility = View.GONE
+        attachBrowser(HOME_URL, incognito = incognito)
+    }
+
+    private fun switchWindow(windowId: Int) {
+        val target = browserWindows.firstOrNull { it.id == windowId } ?: return
+        if (windowId == activeWindowId || target.browser.isClosed()) return
+
+        browserWindows.firstOrNull { it.id == activeWindowId }?.browser?.let { current ->
+            if (!hasActiveDownloadForBrowser(current)) current.onPause()
+        }
+        browserSlot.removeAllViews()
+        activeWindowId = target.id
+        browser = target.browser
+        target.browser.onResume()
+        browserSlot.addView(target.browser.getSurfaceContainer(), FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ))
+        rendererErrorPanel.visibility = View.GONE
+        lastRequestedUrl = target.url
+        if (!target.incognito && target.url.startsWith("http")) lastSuccessfulUrl = target.url
+        searchField.hint = if (target.incognito) "Incognito browsing" else "Search or enter address"
+        searchField.setText(target.url)
+        showBrowser()
+        updateWindowsButton()
+        updateShieldButton()
+    }
+
+    private fun closeWindow(windowId: Int) {
+        val target = browserWindows.firstOrNull { it.id == windowId } ?: return
+        if (hasActiveDownloadForBrowser(target.browser)) {
+            Toast.makeText(this, "Wait for this window's download to finish", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val wasActive = target.id == activeWindowId
+        if (wasActive) {
+            val replacement = browserWindows.firstOrNull { it.id != target.id }
+            if (replacement != null) {
+                switchWindow(replacement.id)
+            } else {
+                browserSlot.removeAllViews()
+                activeWindowId = -1
+            }
+        }
+        browserWindows.removeAll { it.id == target.id }
+        runCatching { if (!target.browser.isClosed()) target.browser.close() }
+            .onFailure { Log.w(TAG, "Unable to close browser window id=${target.id}", it) }
+
+        if (target.incognito && browserWindows.none { it.incognito }) {
+            privateDownloadIds.toList().forEach { id ->
+                if (!activeDownloadItems.containsKey(id) && !pendingPublicSaveIds.contains(id)) {
+                    downloadRecords.remove(id)
+                    downloadSuggestedNames.remove(id)
+                    privateDownloadIds.remove(id)
+                }
+            }
+            persistDownloads()
+            if (showingDownloads) renderDownloads()
+            Log.i(TAG, "INCOGNITO_SESSION_CLOSED")
+        }
+
+        if (browserWindows.isEmpty()) attachBrowser(HOME_URL)
+        updateWindowsButton()
+    }
+
     private fun navigateFromAddressBar() {
         val target = BrowserAddressResolver.resolve(searchField.text?.toString().orEmpty())
         if (target.isBlank()) return
@@ -750,6 +914,7 @@ class MainActivity : AppCompatActivity() {
         lastRequestedUrl = target
         rendererErrorPanel.visibility = View.GONE
         browser.loadUrl(target)
+        browserWindows.firstOrNull { it.id == activeWindowId }?.url = target
         searchField.setText(target)
         searchField.clearFocus()
         (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
@@ -761,11 +926,17 @@ class MainActivity : AppCompatActivity() {
         rendererRecoveryPending = false
         rendererErrorPanel.visibility = View.GONE
         val oldBrowser = browser
-        val restoreUrl = lastSuccessfulUrl
+        val currentWindow = browserWindows.firstOrNull { it.id == activeWindowId }
+        val restoreUrl = currentWindow?.url?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
+            ?: lastSuccessfulUrl
         runCatching { oldBrowser.close() }
             .onFailure { Log.w(TAG, "Closing browser before manual retry reported an error", it) }
         browserSlot.removeAllViews()
-        attachBrowser(restoreUrl)
+        attachBrowser(
+            restoreUrl,
+            incognito = currentWindow?.incognito == true,
+            replaceWindowId = currentWindow?.id
+        )
     }
 
     private fun isSupportedWebUrl(value: String?): Boolean {
@@ -820,6 +991,7 @@ class MainActivity : AppCompatActivity() {
         rendererRecoveryPending = false
         lastRequestedUrl = url
         browser.loadUrl(url)
+        browserWindows.firstOrNull { it.id == activeWindowId }?.url = url
         searchField.setText(url)
     }
 
@@ -871,7 +1043,8 @@ class MainActivity : AppCompatActivity() {
         canceled: Boolean,
         mimeType: String
     ) {
-        requestDownloadNotificationPermissionIfNeeded()
+        val isPrivateDownload = privateDownloadIds.contains(downloadId)
+        if (!isPrivateDownload) requestDownloadNotificationPermissionIfNeeded()
         val item = activeDownloadItems[downloadId]
         val id = downloadId
         val record = downloadRecords[id] ?: DownloadRecord(
@@ -923,7 +1096,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        publishDownloadNotification(record)
+        if (!isPrivateDownload) publishDownloadNotification(record)
         persistDownloads()
         if (showingDownloads) renderDownloads()
     }
@@ -939,7 +1112,7 @@ class MainActivity : AppCompatActivity() {
             publishDownloadNotification(record)
             persistDownloads()
             if (showingDownloads) renderDownloads()
-            Log.e(TAG, "DOWNLOAD_FILE_SAVE_FAILED name=${record.name} reason=missing_source")
+            Log.e(TAG, "DOWNLOAD_FILE_SAVE_FAILED name=${if (privateDownloadIds.contains(record.id)) "<private>" else record.name} reason=missing_source")
             maybeStopDownloadKeepAliveService()
             return
         }
@@ -962,7 +1135,7 @@ class MainActivity : AppCompatActivity() {
                     sourceFile = extractedFile
                 } else {
                     directory.deleteRecursively()
-                    Log.i(TAG, "Downloaded ZIP is a regular file, not a single-APK archive: ${record.name}")
+                    Log.i(TAG, "Downloaded ZIP is a regular file, not a single-APK archive: ${if (privateDownloadIds.contains(record.id)) "<private>" else record.name}")
                 }
             }
             val displayName = if (sourceFile == downloadedFile) record.name else sourceFile.name
@@ -994,12 +1167,16 @@ class MainActivity : AppCompatActivity() {
                 val updated = contentResolver.update(destinationUri!!, ready, null, null)
                 if (updated <= 0) throw IllegalStateException("Unable to publish the Downloads file")
                 if (downloadedFile.exists() && !downloadedFile.delete()) {
-                    Log.w(TAG, "Temporary download could not be deleted: " + downloadedFile.absolutePath)
+                    Log.w(TAG, "Temporary download could not be deleted: " + if (privateDownloadIds.contains(record.id)) "<private>" else downloadedFile.absolutePath)
                 }
             } catch (error: Throwable) {
                 failure = error
                 destinationUri?.let { runCatching { contentResolver.delete(it, null, null) } }
-                Log.e(TAG, "Unable to save the downloaded file", error)
+                if (privateDownloadIds.contains(record.id)) {
+                    Log.e(TAG, "Unable to save private downloaded file")
+                } else {
+                    Log.e(TAG, "Unable to save the downloaded file", error)
+                }
             } finally {
                 extractedApk?.let { if (it.exists()) it.delete() }
                 extractionDirectory?.deleteRecursively()
@@ -1015,15 +1192,18 @@ class MainActivity : AppCompatActivity() {
                     record.complete = true
                     record.interrupted = false
                     record.percent = 100
-                    Log.i(TAG, "DOWNLOAD_FILE_SAVED name=${record.name} mimeType=$mimeType bytes=${record.receivedBytes} uri=$savedUri")
+                    Log.i(TAG, "DOWNLOAD_FILE_SAVED name=${if (privateDownloadIds.contains(record.id)) "<private>" else record.name} mimeType=$mimeType bytes=${record.receivedBytes} uri=${if (privateDownloadIds.contains(record.id)) "<private>" else savedUri}")
                 } else {
                     record.complete = false
                     record.interrupted = true
-                    Log.e(TAG, "DOWNLOAD_FILE_SAVE_FAILED name=${record.name}")
+                    Log.e(TAG, "DOWNLOAD_FILE_SAVE_FAILED name=${if (privateDownloadIds.contains(record.id)) "<private>" else record.name}")
                 }
                 record.updatedAt = System.currentTimeMillis()
-                publishDownloadNotification(record)
-                persistDownloads()
+                val privateDownload = privateDownloadIds.contains(record.id)
+                if (!privateDownload) {
+                    publishDownloadNotification(record)
+                    persistDownloads()
+                }
                 downloadSuggestedNames.remove(record.id)
                 if (showingDownloads) renderDownloads()
                 maybeStopDownloadKeepAliveService()
@@ -1088,6 +1268,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun publishDownloadNotification(record: DownloadRecord) {
+        if (privateDownloadIds.contains(record.id)) return
         if (!requestDownloadNotificationPermissionIfNeeded()) return
         val manager = NotificationManagerCompat.from(this)
         if (!manager.areNotificationsEnabled()) return
@@ -1126,6 +1307,7 @@ class MainActivity : AppCompatActivity() {
         val notification = builder.build()
 
         try {
+            if (privateDownloadIds.contains(record.id)) return
             manager.notify(DOWNLOAD_NOTIFICATION_ID, notification)
             Log.i(TAG, "DOWNLOAD_NOTIFICATION_POSTED name=${record.name} complete=${record.complete} percent=${record.percent}")
         } catch (error: SecurityException) {
@@ -1135,7 +1317,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderDownloads() {
         if (!::downloadsList.isInitialized) return
-        selectedDownloadIds.retainAll(downloadRecords.keys)
+        val privateMode = browserWindows.firstOrNull { it.id == activeWindowId }?.incognito == true
+        val visibleRecords = downloadRecords.values.filter {
+            privateDownloadIds.contains(it.id) == privateMode
+        }
+        val visibleIds = visibleRecords.mapTo(mutableSetOf()) { it.id }
+        selectedDownloadIds.retainAll(visibleIds)
         downloadsList.removeAllViews()
 
         if (selectedDownloadIds.isNotEmpty()) {
@@ -1171,14 +1358,14 @@ class MainActivity : AppCompatActivity() {
             downloadsList.addView(textView("Downloads", 24f, Color.WHITE, bold = true))
         }
 
-        if (downloadRecords.isEmpty()) {
+        if (visibleRecords.isEmpty()) {
             downloadsList.addView(textView(
                 "No downloads yet", 14f, Color.rgb(180, 180, 180)
             ).apply { setPadding(0, dp(24), 0, 0) })
             return
         }
 
-        downloadRecords.values.sortedByDescending { it.updatedAt }
+        visibleRecords.sortedByDescending { it.updatedAt }
             .forEach { downloadsList.addView(createDownloadCard(it)) }
     }
 
@@ -1554,7 +1741,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun persistDownloads() {
         val array = JSONArray()
-        downloadRecords.values.forEach { record ->
+        downloadRecords.values.filterNot { privateDownloadIds.contains(it.id) }.forEach { record ->
             array.put(JSONObject().apply {
                 put("id", record.id)
                 put("name", record.name)
@@ -1643,20 +1830,25 @@ class MainActivity : AppCompatActivity() {
         when {
             showingDownloads -> showBrowser()
             ::browser.isInitialized && browser.canGoBack() -> browser.goBack()
+            browserWindows.size > 1 -> closeWindow(activeWindowId)
             else -> super.onBackPressed()
         }
     }
 
     override fun onPause() {
-        // Do not pause the Chromium browser while it owns an active transfer.
-        // The foreground service keeps this process alive after the task is removed.
-        if (::browser.isInitialized && !hasActiveDownloadWork()) browser.onPause()
+        // Keep only browser instances that own an active transfer running.
+        browserWindows.forEach { window ->
+            if (!hasActiveDownloadForBrowser(window.browser)) window.browser.onPause()
+        }
         super.onPause()
     }
 
     override fun onResume() {
         super.onResume()
-        if (::browser.isInitialized) browser.onResume()
+        browserWindows.forEach { window ->
+            if (window.id == activeWindowId) window.browser.onResume()
+            else if (!hasActiveDownloadForBrowser(window.browser)) window.browser.onPause()
+        }
         if (DownloadKeepAliveService.isRunning) {
             restoreSavedDownloads()
             renderDownloads()
@@ -1666,25 +1858,37 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
-        if (::browser.isInitialized) outState.putBundle(KEY_BROWSER_STATE, browser.saveState())
-        preferences.edit().putString(KEY_LAST_URL, lastSuccessfulUrl).apply()
+        val activeWindow = browserWindows.firstOrNull { it.id == activeWindowId }
+        if (activeWindow != null && !activeWindow.incognito && !activeWindow.browser.isClosed()) {
+            outState.putBundle(KEY_BROWSER_STATE, activeWindow.browser.saveState())
+            preferences.edit().putString(KEY_LAST_URL, lastSuccessfulUrl).apply()
+        }
         super.onSaveInstanceState(outState)
     }
 
     override fun onDestroy() {
         activityDestroying = true
-        if (::browser.isInitialized && hasActiveDownloadWork() && downloadKeepAliveStarted) {
-            // Keep the Cefrium browser/profile and its callback owner strongly
-            // reachable. Closing it here turns the active transfer into interrupted.
-            DownloadKeepAliveService.retainBrowser(this, browser)
+        if (hasActiveDownloadWork() && downloadKeepAliveStarted) {
+            // The service owns the one browser instance whose download callback is still active.
+            val retained = downloadBrowserOwners.entries.firstOrNull { (id, _) ->
+                activeDownloadItems.containsKey(id) || pendingPublicSaveIds.contains(id)
+            }?.value ?: browser
+            DownloadKeepAliveService.retainBrowser(this, retained)
+            browserToCloseAfterDownload = retained
             browserCloseDeferredForDownload = true
+            browserWindows.forEach { window ->
+                if (window.browser !== retained) runCatching { if (!window.browser.isClosed()) window.browser.close() }
+            }
             Log.i(TAG, "BROWSER_CLOSE_DEFERRED_FOR_DOWNLOAD pendingSave=${pendingPublicSaveIds.isNotEmpty()}")
         } else {
             if (downloadKeepAliveStarted) DownloadKeepAliveService.stop(this)
             DownloadKeepAliveService.releaseBrowser(this)
             downloadKeepAliveStarted = false
-            if (::browser.isInitialized) browser.close()
+            browserWindows.forEach { window ->
+                runCatching { if (!window.browser.isClosed()) window.browser.close() }
+            }
         }
+        browserWindows.clear()
         super.onDestroy()
     }
 

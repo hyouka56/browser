@@ -12,8 +12,8 @@ android {
         applicationId = "com.search.browser"
         minSdk = 29
         targetSdk = 36
-        versionCode = 12
-        versionName = "1.0.11"
+        versionCode = 13
+        versionName = "1.0.12"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -26,6 +26,10 @@ android {
         create("phone") {
             dimension = "target"
             ndk { abiFilters += listOf("armeabi-v7a") }
+        }
+        create("arm64") {
+            dimension = "target"
+            ndk { abiFilters += listOf("arm64-v8a") }
         }
     }
 
