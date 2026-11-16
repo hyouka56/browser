@@ -85,30 +85,30 @@ jobs:
           PY
           "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --verbose "$PHONE_DEBUG"
           "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --verbose "$ARM64_DEBUG"
-          "$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$ARM64_DEBUG" | grep -F "package: name='com.search.browser' versionCode='14' versionName='1.0.13'"
-          cp "$PHONE_DEBUG" Browser-1.0.13-ARM32-TV-Lite-Debug-Signed.apk
-          cp "$ARM64_DEBUG" Browser-1.0.12-ARM64-Debug-Signed.apk
+          "$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$PHONE_DEBUG" | grep -F "package: name='com.search.browser' versionCode='15' versionName='1.0.14'"
+          cp "$PHONE_DEBUG" Browser-1.0.14-ARM32-TV-Lite-Debug-Signed.apk
+          cp "$ARM64_DEBUG" Browser-1.0.14-ARM64-Debug-Signed.apk
 
       - name: Upload installable ARM32 APK
         uses: actions/upload-artifact@v7
         with:
-          name: Browser-1.0.13-ARM32-TV-Lite-Debug-Signed
-          path: Browser-1.0.13-ARM32-TV-Lite-Debug-Signed.apk
+          name: Browser-1.0.14-ARM32-TV-Lite-Debug-Signed
+          path: Browser-1.0.14-ARM32-TV-Lite-Debug-Signed.apk
           if-no-files-found: error
           retention-days: 14
 
       - name: Upload installable ARM64 APK
         uses: actions/upload-artifact@v7
         with:
-          name: Browser-1.0.12-ARM64-Debug-Signed
-          path: Browser-1.0.12-ARM64-Debug-Signed.apk
+          name: Browser-1.0.14-ARM64-Debug-Signed
+          path: Browser-1.0.14-ARM64-Debug-Signed.apk
           if-no-files-found: error
           retention-days: 14
 
       - name: Upload emulator APK
         uses: actions/upload-artifact@v7
         with:
-          name: Browser-1.0.12-x86_64-Emulator-Debug
+          name: Browser-1.0.14-x86_64-Emulator-Debug
           path: app/build/outputs/apk/emulator/debug/app-emulator-debug.apk
           if-no-files-found: error
           retention-days: 14
@@ -140,7 +140,7 @@ jobs:
       - name: Download emulator APK
         uses: actions/download-artifact@v7
         with:
-          name: Browser-1.0.12-x86_64-Emulator-Debug
+          name: Browser-1.0.14-x86_64-Emulator-Debug
           path: ${{ runner.temp }}/browser-apk
 
       - name: Enable KVM

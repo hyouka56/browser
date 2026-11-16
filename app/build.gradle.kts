@@ -1,6 +1,6 @@
 plugins {
     id("com.android.application")
-    id("com.cefrium") version "0.20.0"
+    id("com.cefrium") version "0.21.0"
 }
 
 android {
@@ -12,8 +12,8 @@ android {
         applicationId = "com.search.browser"
         minSdk = 29
         targetSdk = 35
-        versionCode = 14
-        versionName = "1.0.13"
+        versionCode = 15
+        versionName = "1.0.14"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -67,7 +67,7 @@ android {
 }
 
 dependencies {
-    implementation("com.cefrium:cefrium-sdk:0.20.0")
+    implementation("com.cefrium:cefrium-sdk:0.21.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.mediarouter:mediarouter:1.7.0")
     implementation("androidx.core:core:1.16.0")
