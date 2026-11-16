@@ -35,6 +35,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
@@ -54,6 +55,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var browserSlot: FrameLayout
     private lateinit var swipeRefresh: SwipeRefreshLayout
     private lateinit var downloadsPanel: ScrollView
+    private lateinit var downloadsSwipeRefresh: SwipeRefreshLayout
     private lateinit var downloadsList: LinearLayout
     private lateinit var searchField: EditText
     private lateinit var shieldButton: ImageButton
@@ -70,6 +72,7 @@ class MainActivity : AppCompatActivity() {
     private val downloadRecords = LinkedHashMap<Int, DownloadRecord>()
     private val activeDownloadItems = LinkedHashMap<Int, CefriumBrowser.DownloadItem>()
     private val downloadSuggestedNames = LinkedHashMap<Int, String>()
+    private val selectedDownloadIds = linkedSetOf<Int>()
     private val pendingPublicSaveIds = mutableSetOf<Int>()
     private var adBlockingEnabled = true
     private var showingDownloads = false
@@ -490,7 +493,18 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(Color.BLACK)
             addView(downloadsList)
         }
-        content.addView(downloadsPanel, FrameLayout.LayoutParams(
+        downloadsSwipeRefresh = SwipeRefreshLayout(this).apply {
+            visibility = View.GONE
+            setColorSchemeColors(Color.WHITE)
+            setProgressBackgroundColorSchemeColor(Color.rgb(24, 24, 24))
+            setOnChildScrollUpCallback { _, _ -> downloadsPanel.canScrollVertically(-1) }
+            setOnRefreshListener { refreshDownloads() }
+            addView(downloadsPanel, ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            ))
+        }
+        content.addView(downloadsSwipeRefresh, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT
         ))
@@ -747,12 +761,15 @@ class MainActivity : AppCompatActivity() {
         showingDownloads = true
         swipeRefresh.visibility = View.GONE
         downloadsPanel.visibility = View.VISIBLE
+        downloadsSwipeRefresh.visibility = View.VISIBLE
         searchField.clearFocus()
         renderDownloads()
     }
 
     private fun showBrowser() {
         showingDownloads = false
+        selectedDownloadIds.clear()
+        downloadsSwipeRefresh.visibility = View.GONE
         downloadsPanel.visibility = View.GONE
         swipeRefresh.visibility = View.VISIBLE
     }
@@ -1028,13 +1045,46 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderDownloads() {
         if (!::downloadsList.isInitialized) return
+        selectedDownloadIds.retainAll(downloadRecords.keys)
         downloadsList.removeAllViews()
-        downloadsList.addView(textView("Downloads", 24f, Color.WHITE, bold = true))
-        downloadsList.addView(textView(
-            "Files saved to Downloads",
-            13f,
-            Color.rgb(155, 155, 155)
-        ).apply { setPadding(0, dp(7), 0, dp(25)) })
+
+        if (selectedDownloadIds.isNotEmpty()) {
+            val selectionBar = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            selectionBar.addView(textView(
+                "${selectedDownloadIds.size} selected", 18f, Color.WHITE, bold = true
+            ), LinearLayout.LayoutParams(0, dp(42), 1f))
+            selectionBar.addView(
+                downloadActionButton("Delete", Color.rgb(92, 34, 34)) {
+                    confirmDeleteSelectedDownloads()
+                },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40))
+            )
+            selectionBar.addView(
+                downloadActionButton("Cancel", Color.rgb(48, 48, 48)) {
+                    selectedDownloadIds.clear()
+                    renderDownloads()
+                },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)).apply {
+                    marginStart = dp(8)
+                }
+            )
+            downloadsList.addView(selectionBar)
+            downloadsList.addView(textView(
+                "Tap other completed files to add them to the selection.",
+                12f,
+                Color.rgb(155, 155, 155)
+            ).apply { setPadding(0, dp(7), 0, dp(22)) })
+        } else {
+            downloadsList.addView(textView("Downloads", 24f, Color.WHITE, bold = true))
+            downloadsList.addView(textView(
+                "Files saved to Downloads · Long-press a completed file to select it",
+                13f,
+                Color.rgb(155, 155, 155)
+            ).apply { setPadding(0, dp(7), 0, dp(25)) })
+        }
 
         if (downloadRecords.isEmpty()) {
             downloadsList.addView(textView(
@@ -1044,15 +1094,18 @@ class MainActivity : AppCompatActivity() {
         }
 
         downloadRecords.values.sortedByDescending { it.updatedAt }
-            .take(1)
             .forEach { downloadsList.addView(createDownloadCard(it)) }
     }
 
     private fun createDownloadCard(record: DownloadRecord): View {
+        val isSelected = selectedDownloadIds.contains(record.id)
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(13), dp(14), dp(12))
-            background = roundedBackground(Color.rgb(16, 16, 16), dp(14))
+            background = roundedBackground(
+                if (isSelected) Color.rgb(38, 38, 38) else Color.rgb(16, 16, 16),
+                dp(14)
+            )
         }
 
         val titleRow = LinearLayout(this).apply {
@@ -1060,13 +1113,18 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         titleRow.addView(textView(
-            record.name, 14f, Color.WHITE, bold = true
+            (if (isSelected) "✓  " else "") + record.name,
+            14f,
+            Color.WHITE,
+            bold = true
         ).apply {
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
         }, LinearLayout.LayoutParams(0, -2, 1f))
 
+        val isReadyToSelect = record.complete && !pendingPublicSaveIds.contains(record.id)
         val statusText = when {
+            record.complete && !isReadyToSelect -> "SAVING"
             record.complete -> "DONE"
             record.canceled -> "CANCELED"
             record.interrupted -> "INTERRUPTED"
@@ -1077,6 +1135,7 @@ class MainActivity : AppCompatActivity() {
         card.addView(titleRow)
 
         val detail = when {
+            record.complete && !isReadyToSelect -> "Saving to Downloads…"
             record.complete -> "Completed · ${formatBytes(record.receivedBytes)}"
             record.canceled -> "Canceled"
             record.interrupted -> "Download interrupted"
@@ -1098,8 +1157,20 @@ class MainActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(4)
             ))
 
-        } else if (record.complete) {
-            card.setOnClickListener { openDownloadedFile(record) }
+        } else if (isReadyToSelect) {
+            card.isClickable = true
+            card.isLongClickable = true
+            card.setOnClickListener {
+                if (selectedDownloadIds.isNotEmpty()) {
+                    toggleDownloadSelection(record.id)
+                } else {
+                    openDownloadedFile(record)
+                }
+            }
+            card.setOnLongClickListener {
+                toggleDownloadSelection(record.id)
+                true
+            }
         }
 
         if (!record.complete && !record.canceled && !record.interrupted) {
@@ -1144,6 +1215,126 @@ class MainActivity : AppCompatActivity() {
         isClickable = true
         isFocusable = true
         setOnClickListener { action() }
+    }
+
+    private fun toggleDownloadSelection(downloadId: Int) {
+        val record = downloadRecords[downloadId] ?: return
+        if (!record.complete || pendingPublicSaveIds.contains(downloadId)) return
+        if (!selectedDownloadIds.add(downloadId)) selectedDownloadIds.remove(downloadId)
+        renderDownloads()
+    }
+
+    private fun confirmDeleteSelectedDownloads() {
+        val selected = selectedDownloadIds.mapNotNull(downloadRecords::get)
+            .filter { it.complete && !pendingPublicSaveIds.contains(it.id) }
+        if (selected.isEmpty()) return
+
+        val title = if (selected.size == 1) "Delete downloaded file?" else "Delete ${selected.size} files?"
+        val message = if (selected.size == 1) {
+            "${selected.first().name} will be removed from the Downloads folder."
+        } else {
+            "The ${selected.size} selected files will be removed from the Downloads folder."
+        }
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(message)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete") { _, _ -> deleteSelectedDownloads(selected) }
+            .show()
+    }
+
+    private fun deleteSelectedDownloads(records: List<DownloadRecord>) {
+        if (records.isEmpty()) return
+        downloadsSwipeRefresh.isEnabled = false
+        Thread({
+            val deletedIds = mutableListOf<Int>()
+            val failedNames = mutableListOf<String>()
+            records.forEach { record ->
+                if (deleteCompletedDownloadFile(record)) deletedIds += record.id
+                else failedNames += record.name
+            }
+            runOnUiThread {
+                deletedIds.forEach { id ->
+                    downloadRecords.remove(id)
+                    selectedDownloadIds.remove(id)
+                }
+                selectedDownloadIds.retainAll(downloadRecords.keys)
+                persistDownloads()
+                downloadsSwipeRefresh.isEnabled = true
+
+                val latestRecord = downloadRecords.values.maxByOrNull { it.updatedAt }
+                if (latestRecord != null) publishDownloadNotification(latestRecord)
+                else NotificationManagerCompat.from(this).cancel(DOWNLOAD_NOTIFICATION_ID)
+
+                renderDownloads()
+                val message = when {
+                    failedNames.isEmpty() -> "${deletedIds.size} file(s) deleted"
+                    deletedIds.isEmpty() -> "Unable to delete the selected file(s)"
+                    else -> "${deletedIds.size} deleted · ${failedNames.size} could not be deleted"
+                }
+                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                if (failedNames.isNotEmpty()) {
+                    Log.w(TAG, "DOWNLOAD_DELETE_FAILED names=${failedNames.joinToString()}")
+                }
+            }
+        }, "delete-downloaded-files").start()
+    }
+
+    private fun deleteCompletedDownloadFile(record: DownloadRecord): Boolean {
+        if (!record.complete || record.path.isBlank()) return false
+        return runCatching {
+            if (record.path.startsWith("content://")) {
+                val uri = Uri.parse(record.path)
+                val deletedRows = contentResolver.delete(uri, null, null)
+                deletedRows > 0
+            } else {
+                val file = File(record.path).canonicalFile
+                val stagingDirectory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                    ?: File(filesDir, "downloads")
+                val isOwnedStagingFile = file.parentFile == stagingDirectory.canonicalFile &&
+                    file.name.startsWith("${record.id}-")
+                if (!isOwnedStagingFile) {
+                    Log.w(TAG, "Refusing to delete completed file outside app-owned storage id=${record.id}")
+                    false
+                } else {
+                    !file.exists() || file.delete()
+                }
+            }
+        }.onFailure {
+            Log.e(TAG, "Unable to delete completed download id=${record.id}", it)
+        }.getOrDefault(false)
+    }
+
+    private fun isDownloadFileAvailable(record: DownloadRecord): Boolean {
+        if (record.path.isBlank()) return false
+        return runCatching {
+            if (record.path.startsWith("content://")) {
+                contentResolver.openFileDescriptor(Uri.parse(record.path), "r")?.use { true } == true
+            } else {
+                File(record.path).isFile
+            }
+        }.getOrDefault(false)
+    }
+
+    private fun refreshDownloads() {
+        val completedSnapshot = downloadRecords.values
+            .filter { it.complete && !pendingPublicSaveIds.contains(it.id) }
+            .toList()
+        Thread({
+            val missingIds = completedSnapshot
+                .filterNot(::isDownloadFileAvailable)
+                .map { it.id }
+            runOnUiThread {
+                missingIds.forEach { id ->
+                    downloadRecords.remove(id)
+                    selectedDownloadIds.remove(id)
+                }
+                persistDownloads()
+                renderDownloads()
+                downloadsSwipeRefresh.isRefreshing = false
+                Toast.makeText(this, "Downloads refreshed", Toast.LENGTH_SHORT).show()
+            }
+        }, "refresh-downloads").start()
     }
 
     private fun findLiveDownload(record: DownloadRecord): CefriumBrowser.DownloadItem? =
