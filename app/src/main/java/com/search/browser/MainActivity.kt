@@ -143,6 +143,69 @@ class MainActivity : AppCompatActivity() {
             """.trimIndent(),
             setOf("*")
         )
+        if (BuildConfig.DEBUG && intent.getBooleanExtra(EXTRA_TEST_DOWNLOAD_PAGE, false)) {
+            instance.addDocumentStartJavaScript(
+                """
+                (() => {
+                    const installDownloadTest = () => {
+                        if (!document.body) return;
+                        document.title = "Download Test";
+                        document.body.replaceChildren();
+                        Object.assign(document.body.style, {
+                            margin: "0",
+                            padding: "0",
+                            background: "#000",
+                            color: "#fff",
+                            overflow: "hidden"
+                        });
+
+                        const addDownloadButton = (id, label, fileName, mimeType, content, top) => {
+                            const button = document.createElement("button");
+                            button.id = id;
+                            button.textContent = label;
+                            button.style.cssText = `position:fixed;left:0;width:100vw;top:${'$'}{top};height:45vh;font-size:26px;background:#181818;color:#fff;border:2px solid #fff;z-index:2147483647;`;
+                            button.addEventListener("click", () => {
+                                const blob = new Blob([content], { type: mimeType });
+                                const url = URL.createObjectURL(blob);
+                                const link = document.createElement("a");
+                                link.href = url;
+                                link.download = fileName;
+                                document.body.appendChild(link);
+                                link.click();
+                                link.remove();
+                                setTimeout(() => URL.revokeObjectURL(url), 60000);
+                            });
+                            document.body.appendChild(button);
+                        };
+
+                        addDownloadButton(
+                            "download-file-test",
+                            "Download test file",
+                            "download-test.txt",
+                            "text/plain",
+                            "Browser download integration test\n",
+                            "0"
+                        );
+                        addDownloadButton(
+                            "download-apk-test",
+                            "Download APK test file",
+                            "download-test.apk",
+                            "application/vnd.android.package-archive",
+                            "APK download notification fixture",
+                            "50vh"
+                        );
+                    };
+
+                    if (document.readyState === "loading") {
+                        document.addEventListener("DOMContentLoaded", installDownloadTest, { once: true });
+                    } else {
+                        installDownloadTest();
+                    }
+                })();
+                """.trimIndent(),
+                setOf("*")
+            )
+        }
         instance.setAdBlockEnabled(adBlockingEnabled)
         browserSlot.addView(
             instance.getSurfaceContainer(),
@@ -1185,6 +1248,7 @@ class MainActivity : AppCompatActivity() {
         const val KEY_LAST_URL = "last_successful_url"
         const val KEY_NOTIFICATION_PERMISSION_ASKED = "download_notification_permission_asked"
         const val EXTRA_TEST_URL = "com.search.browser.TEST_URL"
+        const val EXTRA_TEST_DOWNLOAD_PAGE = "com.search.browser.TEST_DOWNLOAD_PAGE"
         const val EXTRA_SHOW_DOWNLOADS = "com.search.browser.SHOW_DOWNLOADS"
         const val EXTRA_TEST_CRASH_RENDERER = "com.search.browser.TEST_CRASH_RENDERER"
         const val TAG = "Browser"

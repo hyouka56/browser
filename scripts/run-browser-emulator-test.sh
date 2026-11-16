@@ -89,58 +89,22 @@ wait_for_log "PAGE_BITMAP_CAPTURED url=https://example.com/" 2 60
 sleep 1
 adb exec-out screencap -p > "$ARTIFACTS/page-after-renderer-recovery.png"
 
-# Verify actual Chromium downloads and Android notifications with in-page Blob fixtures.
-DOWNLOAD_TEST_HTML="$RUNNER_TEMP/browser-download-test.html"
-cat > "$DOWNLOAD_TEST_HTML" <<'HTML'
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Download Test</title>
-  <style>
-    body { margin: 0; padding: 24px; background: #000; color: #fff; font: 22px sans-serif; }
-    h1 { font-size: 26px; }
-    button { display: block; width: 100%; min-height: 132px; margin: 28px 0; font-size: 25px; }
-  </style>
-</head>
-<body>
-  <h1>Browser download integration test</h1>
-  <button id="file">Download test file</button>
-  <button id="apk">Download APK test file</button>
-  <script>
-    function downloadFile(name, mimeType, content) {
-      const url = URL.createObjectURL(new Blob([content], { type: mimeType }));
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = name;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
-    }
-    document.getElementById('file').addEventListener('click', () => {
-      downloadFile('download-test.txt', 'text/plain', 'Browser download integration test\n');
-    });
-    document.getElementById('apk').addEventListener('click', () => {
-      downloadFile('download-test.apk', 'application/vnd.android.package-archive', 'APK download notification fixture');
-    });
-  </script>
-</body>
-</html>
-HTML
-DOWNLOAD_TEST_URL="data:text/html;base64,$(base64 -w0 "$DOWNLOAD_TEST_HTML")"
+# Verify actual Chromium downloads and Android notifications using a trusted HTTPS origin.
+DOWNLOAD_TEST_URL="https://example.com/"
 
 if (( EXPECTED_API >= 33 )); then
   adb shell pm grant "$PACKAGE" android.permission.POST_NOTIFICATIONS
 fi
 adb shell am force-stop "$PACKAGE"
 adb shell am start -W -n "$ACTIVITY" \
-  --es com.search.browser.TEST_URL "'$DOWNLOAD_TEST_URL'" \
+  --es com.search.browser.TEST_URL "$DOWNLOAD_TEST_URL" \
+  --ez com.search.browser.TEST_DOWNLOAD_PAGE true \
   2>&1 | tee "$ARTIFACTS/launch-download-test.txt"
 wait_for_log "PAGE_TITLE title=Download Test" 1 60
+sleep 1
 
-adb shell input tap 540 400
+# Test buttons fill two large fixed portions of the viewport to avoid layout-dependent taps.
+adb shell input tap 540 600
 wait_for_log "DOWNLOAD_REQUEST_ACCEPTED name=download-test.txt" 1 60
 wait_for_log "DOWNLOAD_FILE_SAVED name=download-test.txt" 1 90
 adb shell content query \
@@ -159,7 +123,7 @@ if ! grep -F "download-test.txt" "$ARTIFACTS/notification-download-test.txt.txt"
   exit 1
 fi
 
-adb shell input tap 540 900
+adb shell input tap 540 1500
 wait_for_log "DOWNLOAD_REQUEST_ACCEPTED name=download-test.apk" 1 60
 wait_for_log "DOWNLOAD_FILE_SAVED name=download-test.apk" 1 90
 adb shell content query \
