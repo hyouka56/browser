@@ -16,6 +16,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.content.pm.PackageManager
 import android.provider.MediaStore
 import android.provider.Settings
@@ -77,6 +79,9 @@ class MainActivity : AppCompatActivity() {
     private var adBlockingEnabled = true
     private var showingDownloads = false
     private var notificationPermissionRequested = false
+    private var downloadKeepAliveStarted = false
+    private var activityDestroying = false
+    private var browserCloseDeferredForDownload = false
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -153,11 +158,11 @@ class MainActivity : AppCompatActivity() {
                             overflow: "hidden"
                         });
 
-                        const addDownloadButton = (id, label, fileName, mimeType, content, top) => {
+                        const addDownloadButton = (id, label, fileName, mimeType, content, top, height = "45vh") => {
                             const button = document.createElement("button");
                             button.id = id;
                             button.textContent = label;
-                            button.style.cssText = `position:fixed;left:0;width:100vw;top:${'$'}{top};height:45vh;font-size:26px;background:#181818;color:#fff;border:2px solid #fff;z-index:2147483647;`;
+                            button.style.cssText = `position:fixed;left:0;width:100vw;top:${'$'}{top};height:${'$'}{height};font-size:20px;background:#181818;color:#fff;border:2px solid #fff;z-index:2147483647;`;
                             button.addEventListener("click", () => {
                                 const dataUrl = `data:${'$'}{mimeType};charset=utf-8,${'$'}{encodeURIComponent(content)}`;
                                 const link = document.createElement("a");
@@ -185,6 +190,15 @@ class MainActivity : AppCompatActivity() {
                             "application/vnd.android.package-archive",
                             "APK download notification fixture",
                             "50vh"
+                        );
+                        addDownloadButton(
+                            "download-background-test",
+                            "Background download test",
+                            "download-background-test.txt",
+                            "text/plain",
+                            "This download completed after the Browser task was removed.\n",
+                            "90vh",
+                            "9vh"
                         );
                     };
 
@@ -313,6 +327,16 @@ class MainActivity : AppCompatActivity() {
                 target.delete()
                 activeDownloadItems[downloadId] = item
                 downloadSuggestedNames[downloadId] = name
+                if (!startDownloadKeepAliveService(name)) {
+                    activeDownloadItems.remove(downloadId)
+                    downloadSuggestedNames.remove(downloadId)
+                    Log.e(TAG, "DOWNLOAD_REQUEST_REJECTED id=$downloadId name=$name reason=background_service_unavailable")
+                    callback.cancel()
+                    runOnUiThread {
+                        Toast.makeText(this@MainActivity, "Unable to keep this download running in the background", Toast.LENGTH_LONG).show()
+                    }
+                    return
+                }
                 downloadRecords[downloadId]?.let { record ->
                     record.name = name
                     record.url = item.getUrl().orEmpty()
@@ -323,7 +347,15 @@ class MainActivity : AppCompatActivity() {
                     if (showingDownloads) renderDownloads()
                 }
                 Log.i(TAG, "DOWNLOAD_REQUEST_ACCEPTED name=$name id=$downloadId mimeType=${DownloadFileSupport.mimeTypeFor(name, mimeType)} target=${target.absolutePath}")
-                callback.allow(target.absolutePath)
+                if (BuildConfig.DEBUG && name == BACKGROUND_DOWNLOAD_TEST_FILE) {
+                    Log.i(TAG, "DOWNLOAD_BACKGROUND_ALLOW_DELAYED id=$downloadId delayMs=$BACKGROUND_DOWNLOAD_TEST_DELAY_MS")
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        Log.i(TAG, "DOWNLOAD_BACKGROUND_ALLOWING id=$downloadId")
+                        callback.allow(target.absolutePath)
+                    }, BACKGROUND_DOWNLOAD_TEST_DELAY_MS)
+                } else {
+                    callback.allow(target.absolutePath)
+                }
             }
 
             override fun onDownloadUpdated(item: CefriumBrowser.DownloadItem) {
@@ -355,6 +387,7 @@ class MainActivity : AppCompatActivity() {
                         canceled = item.isCanceled(),
                         mimeType = mimeType
                     )
+                    maybeStopDownloadKeepAliveService()
                 }
             }
         })
@@ -370,6 +403,41 @@ class MainActivity : AppCompatActivity() {
             "CEF_BROWSER_CREATED url=$initialUrl activeRenderers=" +
                 CefriumBrowser.activeRenderProcessCount()
         )
+    }
+
+    private fun startDownloadKeepAliveService(name: String): Boolean {
+        return runCatching {
+            val started = DownloadKeepAliveService.start(this, name)
+            if (started) {
+                downloadKeepAliveStarted = true
+                Log.i(TAG, "DOWNLOAD_KEEP_ALIVE_REQUESTED name=$name")
+            }
+            started
+        }.onFailure {
+            Log.e(TAG, "DOWNLOAD_KEEP_ALIVE_START_FAILED name=$name", it)
+        }.getOrDefault(false)
+    }
+
+    private fun hasActiveDownloadWork(): Boolean =
+        activeDownloadItems.values.any { !it.isComplete() && !it.isCanceled() && !it.isInterrupted() } ||
+            pendingPublicSaveIds.isNotEmpty()
+
+    private fun maybeStopDownloadKeepAliveService() {
+        if (hasActiveDownloadWork()) return
+
+        if (downloadKeepAliveStarted) {
+            DownloadKeepAliveService.stop(this)
+            downloadKeepAliveStarted = false
+            Log.i(TAG, "DOWNLOAD_KEEP_ALIVE_RELEASED")
+        }
+
+        if (activityDestroying && browserCloseDeferredForDownload && ::browser.isInitialized) {
+            DownloadKeepAliveService.releaseBrowser(this)
+            runCatching { browser.close() }
+                .onFailure { Log.e(TAG, "BROWSER_CLOSE_AFTER_DOWNLOAD_FAILED", it) }
+            browserCloseDeferredForDownload = false
+            Log.i(TAG, "BROWSER_CLOSED_AFTER_DOWNLOAD")
+        }
     }
 
     private fun handleRendererTermination(
@@ -872,6 +940,7 @@ class MainActivity : AppCompatActivity() {
             persistDownloads()
             if (showingDownloads) renderDownloads()
             Log.e(TAG, "DOWNLOAD_FILE_SAVE_FAILED name=${record.name} reason=missing_source")
+            maybeStopDownloadKeepAliveService()
             return
         }
 
@@ -957,6 +1026,7 @@ class MainActivity : AppCompatActivity() {
                 persistDownloads()
                 downloadSuggestedNames.remove(record.id)
                 if (showingDownloads) renderDownloads()
+                maybeStopDownloadKeepAliveService()
             }
         }, "public-download-copy").start()
     }
@@ -1191,7 +1261,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        if (!record.complete && !record.canceled && !record.interrupted) {
+        if (!record.complete && !record.canceled && !record.interrupted && findLiveDownload(record) != null) {
             val actions = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -1524,7 +1594,7 @@ class MainActivity : AppCompatActivity() {
                     complete = complete,
                     paused = false,
                     canceled = item.optBoolean("canceled"),
-                    interrupted = item.optBoolean("interrupted") || !complete,
+                    interrupted = item.optBoolean("interrupted") || (!complete && !DownloadKeepAliveService.isRunning),
                     updatedAt = item.optLong("updated"),
                     mimeType = item.optString("mime", "application/octet-stream")
                 )
@@ -1578,13 +1648,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
-        if (::browser.isInitialized) browser.onPause()
+        // Do not pause the Chromium browser while it owns an active transfer.
+        // The foreground service keeps this process alive after the task is removed.
+        if (::browser.isInitialized && !hasActiveDownloadWork()) browser.onPause()
         super.onPause()
     }
 
     override fun onResume() {
         super.onResume()
         if (::browser.isInitialized) browser.onResume()
+        if (DownloadKeepAliveService.isRunning) {
+            restoreSavedDownloads()
+            renderDownloads()
+            Log.i(TAG, "DOWNLOADS_RESTORED_WHILE_BACKGROUND_TRANSFER_ACTIVE")
+        }
         updateDefaultBrowserButton()
     }
 
@@ -1595,7 +1672,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        if (::browser.isInitialized) browser.close()
+        activityDestroying = true
+        if (::browser.isInitialized && hasActiveDownloadWork() && downloadKeepAliveStarted) {
+            // Keep the Cefrium browser/profile and its callback owner strongly
+            // reachable. Closing it here turns the active transfer into interrupted.
+            DownloadKeepAliveService.retainBrowser(this, browser)
+            browserCloseDeferredForDownload = true
+            Log.i(TAG, "BROWSER_CLOSE_DEFERRED_FOR_DOWNLOAD pendingSave=${pendingPublicSaveIds.isNotEmpty()}")
+        } else {
+            if (downloadKeepAliveStarted) DownloadKeepAliveService.stop(this)
+            DownloadKeepAliveService.releaseBrowser(this)
+            downloadKeepAliveStarted = false
+            if (::browser.isInitialized) browser.close()
+        }
         super.onDestroy()
     }
 
@@ -1616,6 +1705,8 @@ class MainActivity : AppCompatActivity() {
         const val EXTRA_TEST_DOWNLOAD_PAGE = "com.search.browser.TEST_DOWNLOAD_PAGE"
         const val EXTRA_SHOW_DOWNLOADS = "com.search.browser.SHOW_DOWNLOADS"
         const val EXTRA_TEST_CRASH_RENDERER = "com.search.browser.TEST_CRASH_RENDERER"
+        const val BACKGROUND_DOWNLOAD_TEST_FILE = "download-background-test.txt"
+        const val BACKGROUND_DOWNLOAD_TEST_DELAY_MS = 8_000L
         const val TAG = "Browser"
     }
 }

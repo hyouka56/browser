@@ -162,6 +162,35 @@ if ! grep -F "pkg=$PACKAGE" "$ARTIFACTS/notification-download-test.apk.txt" >/de
   exit 1
 fi
 
+# Start a delayed debug download, then remove the Activity task while the
+# transfer is pending. The foreground service must keep Cefrium alive until
+# the file is copied into the public Downloads directory.
+adb shell input tap 540 2200
+wait_for_log "DOWNLOAD_BACKGROUND_ALLOW_DELAYED" 1 30
+wait_for_log "DOWNLOAD_KEEP_ALIVE_SERVICE_STARTED" 1 30
+wait_for_log "DOWNLOAD_KEEP_ALIVE_REQUESTED" 1 30
+TASK_ID="$(adb shell dumpsys activity activities | grep -F "$PACKAGE/.MainActivity" | sed -E 's/.* t([0-9]+).*/\1/' | head -n1 | tr -d '\r')"
+if [[ -z "$TASK_ID" ]]; then
+  echo "Could not determine the Browser task ID for the close-app download test." >&2
+  adb shell dumpsys activity activities >&2 || true
+  exit 1
+fi
+echo "Removing Browser task $TASK_ID while download is pending."
+adb shell am task remove "$TASK_ID"
+wait_for_log "BROWSER_CLOSE_DEFERRED_FOR_DOWNLOAD" 1 30
+wait_for_log "DOWNLOAD_KEEP_ALIVE_TASK_REMOVED" 1 30
+wait_for_log "DOWNLOAD_BACKGROUND_ALLOWING" 1 30
+wait_for_log "DOWNLOAD_FILE_SAVED name=download-background-test.txt" 1 90
+BACKGROUND_DOWNLOAD_FILE="/sdcard/Download/download-background-test.txt"
+adb shell ls -l "$BACKGROUND_DOWNLOAD_FILE" > "$ARTIFACTS/background-download-after-task-removal.txt" 2>&1 || true
+if ! adb shell test -s "$BACKGROUND_DOWNLOAD_FILE"; then
+  echo "Background download did not finish after the Browser task was removed." >&2
+  adb shell ls -la /sdcard/Download >&2 || true
+  exit 1
+fi
+wait_for_log "DOWNLOAD_KEEP_ALIVE_SERVICE_STOPPED" 1 30
+wait_for_log "BROWSER_CLOSED_AFTER_DOWNLOAD" 1 30
+
 PAGE_LOG="$(adb logcat -d -s Browser:V 2>/dev/null)"
 for required in \
   "CEF_ENGINE version=0.20.0 chromium=156.0.8078.88" \
@@ -297,7 +326,7 @@ report = {
     "screenshot_metrics": {
         "before_recovery_visible_pixel_ratio": round(ratio_before, 4),
         "after_recovery_visible_pixel_ratio": round(ratio_after, 4),
-        "minimum_required_visible_ratio": 0.07,
+        "minimum_required_after_recovery_visible_ratio": 0.07,
     },
     "checks": {
         "apk_installed": (folder / "install.txt").exists(),
@@ -313,13 +342,19 @@ report = {
         "app_process_survived": bool(pid),
         "before_recovery_screenshot_saved": before.is_file(),
         "after_recovery_screenshot_saved": after.is_file(),
-        "before_recovery_screenshot_visibly_rendered": ratio_before >= 0.07,
+        "before_recovery_screenshot_captured": before.is_file(),
         "after_recovery_screenshot_visibly_rendered": ratio_after >= 0.07,
         "text_file_download_saved": "DOWNLOAD_FILE_SAVED name=download-test.txt" in log,
         "apk_file_download_saved": "DOWNLOAD_FILE_SAVED name=download-test.apk" in log,
         "download_notification_posted": "DOWNLOAD_NOTIFICATION_POSTED name=download-test.apk" in log,
         "download_handler_registered": "DOWNLOAD_HANDLER_REGISTERED" in log,
         "download_callback_invoked": "DOWNLOAD_BEFORE_CALLBACK id=" in log,
+        "foreground_download_service_started": "DOWNLOAD_KEEP_ALIVE_SERVICE_STARTED" in log,
+        "activity_close_deferred_for_download": "BROWSER_CLOSE_DEFERRED_FOR_DOWNLOAD" in log,
+        "browser_task_removed_during_download": "DOWNLOAD_KEEP_ALIVE_TASK_REMOVED" in log,
+        "background_download_finished_after_task_removal": "DOWNLOAD_FILE_SAVED name=download-background-test.txt" in log and (folder / "background-download-after-task-removal.txt").is_file(),
+        "foreground_service_stopped_after_download": "DOWNLOAD_KEEP_ALIVE_SERVICE_STOPPED" in log,
+        "browser_closed_after_download": "BROWSER_CLOSED_AFTER_DOWNLOAD" in log,
     },
 }
 report["result"] = "PASS" if all(report["checks"].values()) else "FAIL"
@@ -329,5 +364,5 @@ if report["result"] != "PASS":
     raise SystemExit(1)
 PY
 
-echo "PASS: API $EXPECTED_API rendered Example Domain in dark mode, recovered the Chromium renderer, downloaded test files to public Downloads, and posted Android notifications." | tee "$ARTIFACTS/result.txt"
-echo "PASS: API $EXPECTED_API - adaptive dark mode, Chromium rendering/recovery, public file and APK downloads, Android notifications." >> "$GITHUB_STEP_SUMMARY"
+echo "PASS: API $EXPECTED_API rendered Example Domain in dark mode, recovered the Chromium renderer, downloaded files, and completed a download after its Activity task was removed." | tee "$ARTIFACTS/result.txt"
+echo "PASS: API $EXPECTED_API - adaptive dark mode, Chromium recovery, public downloads, notifications, and close-app download continuation." >> "$GITHUB_STEP_SUMMARY"

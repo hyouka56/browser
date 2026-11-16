@@ -1,6 +1,6 @@
 # Browser — Chromium Android browser
 
-Browser embeds Chromium through Cefrium 0.20.0. The project uses a native Chromium surface, a dark address bar, Chromium ad blocking, and Cefrium download management.
+Browser embeds Chromium through Cefrium 0.20.0. The project uses a native Chromium surface, a dark address bar, Chromium ad blocking, and Cefrium download management with a foreground service that keeps active transfers alive when the Browser task is dismissed.
 
 ## Rendering engine
 
@@ -13,6 +13,8 @@ Browser embeds Chromium through Cefrium 0.20.0. The project uses a native Chromi
 The app creates its browser with the Cefrium surface API. If Cefrium reports that a renderer terminated, the app closes the failed browser instance and creates a fresh Chromium browser. It reloads the last URL whose surface bitmap passed a visible-pixel check.
 
 The black browser UI, address bar, Chromium ad blocking, in-app download list, download pause/resume/cancel actions, and saved download history remain in the app.
+
+Active downloads keep the Cefrium browser process alive through an Android `dataSync` foreground service. Removing Browser from the Recents screen does not close the active download; the service stops after the transfer and its copy into the public Downloads folder finish. Android force-stop, device shutdown, or the operating system terminating the process can still interrupt an in-progress transfer.
 
 ## Build variants
 
