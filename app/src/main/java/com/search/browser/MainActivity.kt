@@ -69,6 +69,7 @@ class MainActivity : AppCompatActivity() {
     private val preferences by lazy { getSharedPreferences(PREFERENCES, MODE_PRIVATE) }
     private val downloadRecords = LinkedHashMap<Int, DownloadRecord>()
     private val activeDownloadItems = LinkedHashMap<Int, CefriumBrowser.DownloadItem>()
+    private val downloadSuggestedNames = LinkedHashMap<Int, String>()
     private val pendingPublicSaveIds = mutableSetOf<Int>()
     private var adBlockingEnabled = true
     private var showingDownloads = false
@@ -302,18 +303,30 @@ class MainActivity : AppCompatActivity() {
                 val target = File(stagingDirectory, "$downloadId-$name")
                 target.delete()
                 activeDownloadItems[downloadId] = item
+                downloadSuggestedNames[downloadId] = name
+                downloadRecords[downloadId]?.let { record ->
+                    record.name = name
+                    record.url = item.getUrl().orEmpty()
+                    record.mimeType = DownloadFileSupport.mimeTypeFor(name, mimeType)
+                    record.updatedAt = System.currentTimeMillis()
+                    publishDownloadNotification(record)
+                    persistDownloads()
+                    if (showingDownloads) renderDownloads()
+                }
                 Log.i(TAG, "DOWNLOAD_REQUEST_ACCEPTED name=$name id=$downloadId mimeType=${DownloadFileSupport.mimeTypeFor(name, mimeType)} target=${target.absolutePath}")
                 callback.allow(target.absolutePath)
             }
 
             override fun onDownloadUpdated(item: CefriumBrowser.DownloadItem) {
                 val path = item.getFullPath().orEmpty()
+                val downloadId = item.getId()
                 val pathName = path.takeIf { it.isNotBlank() }?.let { File(it).name }
-                val suggestedName = item.getSuggestedName().orEmpty().ifBlank { pathName.orEmpty() }
+                    ?.removePrefix("$downloadId-")
+                val suggestedName = downloadSuggestedNames[downloadId]
+                    ?: item.getSuggestedName().orEmpty().ifBlank { pathName.orEmpty() }
                 val urlName = Uri.parse(item.getUrl().orEmpty()).lastPathSegment.orEmpty()
                 val mimeType = item.getMimeType().orEmpty()
                 val name = DownloadFileSupport.normalizedName(suggestedName, urlName, mimeType)
-                val downloadId = item.getId()
                 runOnUiThread {
                     activeDownloadItems[downloadId] = item
                     if (item.isComplete() || item.isCanceled() || item.isInterrupted()) {
@@ -767,7 +780,7 @@ class MainActivity : AppCompatActivity() {
         val id = downloadId
         val record = downloadRecords[id] ?: DownloadRecord(
             id = id,
-            name = name.ifBlank { "Download" },
+            name = downloadSuggestedNames[downloadId] ?: name.ifBlank { "Download" },
             url = item?.getUrl().orEmpty(),
             path = path,
             totalBytes = 0L,
@@ -781,7 +794,7 @@ class MainActivity : AppCompatActivity() {
             updatedAt = System.currentTimeMillis()
         )
 
-        record.name = name.ifBlank { record.name }
+        record.name = downloadSuggestedNames[downloadId] ?: name.ifBlank { record.name }
         record.mimeType = DownloadFileSupport.mimeTypeFor(
             record.name,
             item?.getMimeType().orEmpty().ifBlank { mimeType }
@@ -913,6 +926,7 @@ class MainActivity : AppCompatActivity() {
                 record.updatedAt = System.currentTimeMillis()
                 publishDownloadNotification(record)
                 persistDownloads()
+                downloadSuggestedNames.remove(record.id)
                 if (showingDownloads) renderDownloads()
             }
         }, "public-download-copy").start()
