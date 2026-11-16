@@ -67,7 +67,6 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var browser: CefriumBrowser
     private lateinit var browserSlot: FrameLayout
-    private lateinit var swipeRefresh: SwipeRefreshLayout
     private lateinit var downloadsPanel: ScrollView
     private lateinit var downloadsSwipeRefresh: SwipeRefreshLayout
     private lateinit var downloadsList: LinearLayout
@@ -163,6 +162,9 @@ class MainActivity : AppCompatActivity() {
         replaceWindowId: Int? = null
     ) {
         val instance = CefriumBrowser.createWithSurface(this, incognito)
+        // Native pull-to-refresh triggers only after a downward overscroll at the page top.
+        instance.setPullToRefreshEnabled(!BuildConfig.TV_LITE)
+        Log.i(TAG, "PULL_TO_REFRESH_CONFIG native=${!BuildConfig.TV_LITE}")
         val windowId = replaceWindowId ?: nextWindowId++
         val window = browserWindows.firstOrNull { it.id == windowId }?.also {
             it.browser = instance
@@ -300,7 +302,6 @@ class MainActivity : AppCompatActivity() {
                     val isActiveWindow = activeWindowId == windowId
                     if (isActiveWindow) {
                         updateShieldButton()
-                        if (::swipeRefresh.isInitialized) swipeRefresh.isRefreshing = false
                     }
                     Log.i(TAG, "AD_BLOCK_PAGE_STATS window=$windowId enabled=$adBlockingEnabled blockedRequests=${instance.getBlockedCount()}")
                     val pageUrl = instance.getUrl().orEmpty().ifBlank { window.url }
@@ -615,26 +616,9 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
         ))
 
+        // Let Cefrium own browser gestures. Its native refresh only fires at the web-page top.
         browserSlot = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
-        swipeRefresh = SwipeRefreshLayout(this).apply {
-            isEnabled = !BuildConfig.TV_LITE
-            setColorSchemeColors(Color.WHITE)
-            setProgressBackgroundColorSchemeColor(Color.rgb(24, 24, 24))
-            // CefriumSurfaceContainer reports unconsumed page drags through nested scrolling.
-            setOnRefreshListener {
-                if (::browser.isInitialized && !showingDownloads) {
-                    val currentUrl = browser.getUrl().orEmpty().ifBlank { lastSuccessfulUrl }
-                    browser.loadUrl(currentUrl)
-                } else {
-                    isRefreshing = false
-                }
-            }
-            addView(browserSlot, ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            ))
-        }
-        content.addView(swipeRefresh, FrameLayout.LayoutParams(
+        content.addView(browserSlot, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT
         ))
@@ -1041,7 +1025,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun showDownloadsPanel() {
         showingDownloads = true
-        swipeRefresh.visibility = View.GONE
         downloadsPanel.visibility = View.VISIBLE
         downloadsSwipeRefresh.visibility = View.VISIBLE
         searchField.clearFocus()
@@ -1053,7 +1036,6 @@ class MainActivity : AppCompatActivity() {
         selectedDownloadIds.clear()
         downloadsSwipeRefresh.visibility = View.GONE
         downloadsPanel.visibility = View.GONE
-        swipeRefresh.visibility = View.VISIBLE
     }
 
     private fun updateDownloadRecord(
