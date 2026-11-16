@@ -1213,13 +1213,6 @@ class MainActivity : AppCompatActivity() {
             card.addView(actions, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(42)
             ).apply { topMargin = dp(12) })
-        } else if (!record.complete && (record.canceled || record.interrupted) &&
-            !pendingPublicSaveIds.contains(record.id)) {
-            card.addView(downloadActionButton("Delete", Color.rgb(74, 36, 36)) {
-                confirmDeleteDownloads(listOf(record))
-            }, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(42)
-            ).apply { topMargin = dp(12) })
         }
 
         return LinearLayout(this).apply {
