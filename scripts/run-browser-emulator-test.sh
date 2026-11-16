@@ -104,6 +104,24 @@ wait_for_log "PAGE_TITLE title=Download Test" 1 60
 wait_for_log "DOWNLOAD_HANDLER_REGISTERED" 1 30
 sleep 1
 
+# Android 35's emulator may show a system ANR dialog for Pixel Launcher after
+# renderer recovery. It is not the Browser process. Choose Wait so the modal
+# dialog does not swallow the test-page taps; never close the Browser under test.
+if adb shell dumpsys window 2>/dev/null | grep -F "Application Not Responding" >/dev/null; then
+  echo "System ANR dialog detected for another app; selecting Wait before download taps."
+  adb shell input tap 360 1340
+  for attempt in $(seq 1 10); do
+    if ! adb shell dumpsys window 2>/dev/null | grep -F "Application Not Responding" >/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+  if adb shell dumpsys window 2>/dev/null | grep -F "Application Not Responding" >/dev/null; then
+    echo "System ANR dialog remained after choosing Wait." >&2
+    exit 1
+  fi
+fi
+
 # Test buttons fill two large fixed portions of the viewport to avoid layout-dependent taps.
 adb shell input tap 540 600
 wait_for_log "DOWNLOAD_BEFORE_CALLBACK id=" 1 60
