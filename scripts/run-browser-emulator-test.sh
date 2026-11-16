@@ -136,7 +136,7 @@ if (( EXPECTED_API >= 33 )); then
 fi
 adb shell am force-stop "$PACKAGE"
 adb shell am start -W -n "$ACTIVITY" \
-  --es com.search.browser.TEST_URL "$DOWNLOAD_TEST_URL" \
+  --es com.search.browser.TEST_URL "'$DOWNLOAD_TEST_URL'" \
   2>&1 | tee "$ARTIFACTS/launch-download-test.txt"
 wait_for_log "PAGE_TITLE title=Download Test" 1 60
 
