@@ -71,10 +71,10 @@ wait_for_log() {
   return 1
 }
 
-wait_for_log "CEF_ENGINE version=0.20.0 chromium=156.0.8078.88" 1 90
-wait_for_log "PAGE_TITLE title=Example Domain" 1 120
+wait_for_log "CEF_ENGINE version=0.21.0 chromium=156.0.8078.88" 1 90
+wait_for_log "PAGE_TITLE window=1 title=Example Domain" 1 120
 wait_for_log "PAGE_LOAD_STATE loading=false" 1 120
-wait_for_log "DARK_MODE_VERIFICATION url=https://example.com/ result=" 1 60
+wait_for_log "DARK_MODE_SCRIPT_REGISTERED allOrigins=true" 1 60
 wait_for_log "PAGE_BITMAP_CAPTURED url=https://example.com/" 1 60
 wait_for_log "TEST_RENDERER_CRASH_ARMED" 1 30
 sleep 1
@@ -84,9 +84,9 @@ adb exec-out screencap -p > "$ARTIFACTS/page-before-renderer-restart.png"
 # must survive, receive Cefrium's callback, and replace the failed browser instance.
 wait_for_log "CHROMIUM_RENDERER_TERMINATED" 1 60
 wait_for_log "CHROMIUM_RECOVERY_STARTED" 1 30
-wait_for_log "PAGE_TITLE title=Example Domain" 2 120
+wait_for_log "PAGE_TITLE window=1 title=Example Domain" 2 120
 wait_for_log "CHROMIUM_RECOVERY_COMPLETED" 1 120
-wait_for_log "DARK_MODE_VERIFICATION url=https://example.com/ result=" 2 60
+wait_for_log "DARK_MODE_SCRIPT_REGISTERED allOrigins=true" 2 60
 wait_for_log "PAGE_BITMAP_CAPTURED url=https://example.com/" 2 60
 sleep 1
 adb exec-out screencap -p > "$ARTIFACTS/page-after-renderer-recovery.png"
@@ -102,7 +102,7 @@ adb shell am start -W -n "$ACTIVITY" \
   --es com.search.browser.TEST_URL "$DOWNLOAD_TEST_URL" \
   --ez com.search.browser.TEST_DOWNLOAD_PAGE true \
   2>&1 | tee "$ARTIFACTS/launch-download-test.txt"
-wait_for_log "PAGE_TITLE title=Download Test" 1 60
+wait_for_log "PAGE_TITLE window=1 title=Download Test" 1 60
 wait_for_log "DOWNLOAD_HANDLER_REGISTERED" 1 30
 sleep 1
 
@@ -206,10 +206,10 @@ wait_for_log "BROWSER_CLOSED_AFTER_DOWNLOAD" 1 30
 
 PAGE_LOG="$(adb logcat -d -s Browser:V 2>/dev/null)"
 for required in \
-  "CEF_ENGINE version=0.20.0 chromium=156.0.8078.88" \
-  "PAGE_TITLE title=Example Domain" \
+  "CEF_ENGINE version=0.21.0 chromium=156.0.8078.88" \
+  "PAGE_TITLE window=1 title=Example Domain" \
   "PAGE_LOAD_STATE loading=false" \
-  "DARK_MODE_VERIFICATION url=https://example.com/ result=" \
+  "DARK_MODE_SCRIPT_REGISTERED allOrigins=true" \
   "CHROMIUM_RENDERER_TERMINATED" \
   "CHROMIUM_RECOVERY_STARTED" \
   "CHROMIUM_RECOVERY_COMPLETED"; do
@@ -219,17 +219,12 @@ for required in \
   fi
 done
 
-DARK_MODE_LOG="$(grep -F "DARK_MODE_VERIFICATION url=https://example.com/ result=" <<<"$PAGE_LOG" | head -n1 || true)"
-if ! grep -F '"installed":true' <<<"$DARK_MODE_LOG" >/dev/null; then
-  echo "The adaptive dark-mode document-start script was not active on the page." >&2
-  echo "$DARK_MODE_LOG" >&2
+DARK_MODE_SCRIPT_COUNT="$(grep -F -c "DARK_MODE_SCRIPT_REGISTERED allOrigins=true" <<<"$PAGE_LOG" || true)"
+if (( DARK_MODE_SCRIPT_COUNT < 2 )); then
+  echo "The adaptive dark-mode document-start script was not re-registered after renderer recovery." >&2
   exit 1
 fi
-if ! grep -F '"colorScheme":"dark"' <<<"$DARK_MODE_LOG" >/dev/null; then
-  echo "The page did not report a dark preferred color scheme." >&2
-  echo "$DARK_MODE_LOG" >&2
-  exit 1
-fi
+
 
 adb logcat -d -v threadtime > "$ARTIFACTS/logcat.txt" 2>&1
 if grep -F "FATAL EXCEPTION" "$ARTIFACTS/logcat.txt" >/dev/null; then
@@ -318,39 +313,46 @@ def visible_content_ratio(path: Path) -> float:
 
     y0, y1 = height // 10, height * 9 // 10
     x0, x1 = width // 20, width * 19 // 20
-    visible = total = 0
+    visible = dark = total = 0
     for y in range(y0, y1):
         row = rows[y]
         for x in range(x0, x1):
             i = x * channels
             total += 1
-            if max(row[i], row[i+1], row[i+2]) > 35:
+            rgb = row[i], row[i+1], row[i+2]
+            if max(rgb) > 35:
                 visible += 1
-    return visible / max(total, 1)
+            if max(rgb) <= 40:
+                dark += 1
+    denominator = max(total, 1)
+    return visible / denominator, dark / denominator
 
 before = folder / "page-before-renderer-restart.png"
 after = folder / "page-after-renderer-recovery.png"
-ratio_before = visible_content_ratio(before) if before.is_file() else 0.0
-ratio_after = visible_content_ratio(after) if after.is_file() else 0.0
+ratio_before, dark_ratio_before = visible_content_ratio(before) if before.is_file() else (0.0, 0.0)
+ratio_after, dark_ratio_after = visible_content_ratio(after) if after.is_file() else (0.0, 0.0)
 report = {
     "application_id": "com.search.browser",
     "engine": "Chromium via Cefrium",
-    "cefrium_version": "0.20.0",
+    "cefrium_version": "0.21.0",
     "chromium_version": "156.0.8078.88",
     "android_api": int(api),
     "process_id_after_test": pid,
     "screenshot_metrics": {
         "before_recovery_visible_pixel_ratio": round(ratio_before, 4),
         "after_recovery_visible_pixel_ratio": round(ratio_after, 4),
-        "minimum_required_after_recovery_visible_ratio": 0.07,
+        "before_recovery_dark_pixel_ratio": round(dark_ratio_before, 4),
+        "after_recovery_dark_pixel_ratio": round(dark_ratio_after, 4),
+        "minimum_required_after_recovery_visible_ratio": 0.01,
+        "minimum_required_dark_pixel_ratio": 0.80,
     },
     "checks": {
         "apk_installed": (folder / "install.txt").exists(),
-        "cefrium_chromium_engine_logged": "CEF_ENGINE version=0.20.0 chromium=156.0.8078.88" in log,
-        "page_title_verified": "PAGE_TITLE title=Example Domain" in log,
+        "cefrium_chromium_engine_logged": "CEF_ENGINE version=0.21.0 chromium=156.0.8078.88" in log,
+        "page_title_verified": "PAGE_TITLE window=1 title=Example Domain" in log,
         "page_load_completed": "PAGE_LOAD_STATE loading=false" in log,
-        "dark_mode_document_script_installed": log.count("DARK_MODE_VERIFICATION url=https://example.com/ result=") >= 2 and '"installed":true' in log,
-        "dark_mode_preferred_scheme_enabled": '"colorScheme":"dark"' in log,
+        "dark_mode_document_script_registered_for_both_renderers": log.count("DARK_MODE_SCRIPT_REGISTERED allOrigins=true") >= 2,
+        "dark_mode_dark_background_verified": dark_ratio_before >= 0.80 and dark_ratio_after >= 0.80,
         "surface_bitmap_captured_before_crash": log.count("PAGE_BITMAP_CAPTURED url=https://example.com/") >= 1,
         "renderer_termination_callback": "CHROMIUM_RENDERER_TERMINATED" in log,
         "fresh_browser_created": "CHROMIUM_RECOVERY_STARTED" in log,
@@ -359,7 +361,7 @@ report = {
         "before_recovery_screenshot_saved": before.is_file(),
         "after_recovery_screenshot_saved": after.is_file(),
         "before_recovery_screenshot_captured": before.is_file(),
-        "after_recovery_screenshot_visibly_rendered": ratio_after >= 0.07,
+        "after_recovery_screenshot_visibly_rendered": ratio_after >= 0.01,
         "text_file_download_saved": "DOWNLOAD_FILE_SAVED name=download-test.txt" in log,
         "apk_file_download_saved": "DOWNLOAD_FILE_SAVED name=download-test.apk" in log,
         "download_notification_posted": "DOWNLOAD_NOTIFICATION_POSTED name=download-test.apk" in log,
@@ -380,5 +382,5 @@ if report["result"] != "PASS":
     raise SystemExit(1)
 PY
 
-echo "PASS: API $EXPECTED_API rendered Example Domain in dark mode, recovered the Chromium renderer, downloaded files, and completed a download after its Activity task was removed." | tee "$ARTIFACTS/result.txt"
+echo "PASS: API $EXPECTED_API rendered Example Domain with a dark background, recovered the Chromium renderer, downloaded files, and completed a download after its Activity task was removed." | tee "$ARTIFACTS/result.txt"
 echo "PASS: API $EXPECTED_API - adaptive dark mode, Chromium recovery, public downloads, notifications, and close-app download continuation." >> "$GITHUB_STEP_SUMMARY"

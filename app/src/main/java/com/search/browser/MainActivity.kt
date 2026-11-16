@@ -140,7 +140,7 @@ class MainActivity : AppCompatActivity() {
 
         Log.i(
             TAG,
-            "CEF_ENGINE version=0.20.0 chromium=156.0.8078.88 " +
+            "CEF_ENGINE version=0.21.0 chromium=156.0.8078.88 " +
                 "abi=" + android.os.Build.SUPPORTED_ABIS.joinToString()
         )
         updateShieldButton()
