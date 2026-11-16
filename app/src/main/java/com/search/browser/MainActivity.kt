@@ -620,7 +620,7 @@ class MainActivity : AppCompatActivity() {
             isEnabled = !BuildConfig.TV_LITE
             setColorSchemeColors(Color.WHITE)
             setProgressBackgroundColorSchemeColor(Color.rgb(24, 24, 24))
-            setOnChildScrollUpCallback { _, _ -> browserSlot.canScrollVertically(-1) }
+            // CefriumSurfaceContainer reports unconsumed page drags through nested scrolling.
             setOnRefreshListener {
                 if (::browser.isInitialized && !showingDownloads) {
                     val currentUrl = browser.getUrl().orEmpty().ifBlank { lastSuccessfulUrl }
