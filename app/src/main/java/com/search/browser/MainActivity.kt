@@ -46,6 +46,10 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
 import com.cefrium.CefriumBrowser
+import com.cefrium.CefriumChromeClient
+import com.cefrium.CefriumDownloadClient
+import com.cefrium.CefriumNavigationClient
+import com.cefrium.CefriumRendererTerminationStatus
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -108,6 +112,11 @@ class MainActivity : AppCompatActivity() {
                 ?.takeIf { it.path.startsWith("content://") || it.canceled || it.interrupted }
                 ?.let(::publishDownloadNotification)
         }
+    }
+    private val browserRoleLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        updateDefaultBrowserButton()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -263,8 +272,8 @@ class MainActivity : AppCompatActivity() {
             )
         )
 
-        instance.setCallback(object : CefriumBrowser.Callback() {
-            override fun onUrlChanged(url: String) {
+        instance.setNavigationClient(object : CefriumNavigationClient {
+            override fun onUrlChanged(browser: CefriumBrowser, url: String) {
                 window.url = url
                 if (activeWindowId == windowId) {
                     lastRequestedUrl = url
@@ -277,13 +286,8 @@ class MainActivity : AppCompatActivity() {
                 Log.i(TAG, "PAGE_URL_CHANGED window=$windowId incognito=${window.incognito} url=${if (window.incognito) "<private>" else url}")
             }
 
-            override fun onTitleChanged(title: String) {
-                window.title = title.ifBlank { "New tab" }
-                runOnUiThread { if (activeWindowId == windowId) updateWindowsButton() }
-                Log.i(TAG, "PAGE_TITLE window=$windowId title=${if (window.incognito) "<private>" else title}")
-            }
-
             override fun onLoadingStateChanged(
+                browser: CefriumBrowser,
                 isLoading: Boolean,
                 canGoBack: Boolean,
                 canGoForward: Boolean
@@ -319,17 +323,29 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
+
+            override fun onRenderProcessTerminated(
+                browser: CefriumBrowser,
+                status: CefriumRendererTerminationStatus,
+                errorCode: Int
+            ) {
+                handleRendererTermination(browser, status, errorCode)
+            }
         })
 
-        instance.setOnRenderProcessTerminatedListener { status, errorCode ->
-            runOnUiThread {
-                handleRendererTermination(instance, status, errorCode)
+        instance.setChromeClient(object : CefriumChromeClient {
+            override fun onTitleChanged(browser: CefriumBrowser, title: String) {
+                window.title = title.ifBlank { "New tab" }
+                runOnUiThread { if (activeWindowId == windowId) updateWindowsButton() }
+                Log.i(TAG, "PAGE_TITLE window=$windowId title=${if (window.incognito) "<private>" else title}")
             }
-        }
+        })
+
 
         Log.i(TAG, "DOWNLOAD_HANDLER_REGISTERING")
-        instance.setDownloadHandler(object : CefriumBrowser.CefriumDownloadHandler {
+        instance.setDownloadClient(object : CefriumDownloadClient {
             override fun onBeforeDownload(
+                browser: CefriumBrowser,
                 item: CefriumBrowser.DownloadItem,
                 callback: CefriumBrowser.BeforeDownloadCallback
             ) {
@@ -404,7 +420,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            override fun onDownloadUpdated(item: CefriumBrowser.DownloadItem) {
+            override fun onDownloadUpdated(browser: CefriumBrowser, item: CefriumBrowser.DownloadItem) {
                 val path = item.getFullPath().orEmpty()
                 val downloadId = item.getId()
                 val pathName = path.takeIf { it.isNotBlank() }?.let { File(it).name }
@@ -421,7 +437,7 @@ class MainActivity : AppCompatActivity() {
                             TAG,
                             "DOWNLOAD_ITEM_TERMINAL id=$downloadId name=${if (window.incognito) "<private>" else name} complete=${item.isComplete()} " +
                                 "canceled=${item.isCanceled()} interrupted=${item.isInterrupted()} " +
-                                "reason=${item.getInterruptReason()} path=${if (window.incognito) "<private>" else path}"
+                                "reason=${item.getInterruption()} path=${if (window.incognito) "<private>" else path}"
                         )
                     }
                     updateDownloadRecord(
@@ -492,7 +508,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleRendererTermination(
         failedBrowser: CefriumBrowser,
-        status: Int,
+        status: CefriumRendererTerminationStatus,
         errorCode: Int
     ) {
         if (isFinishing || isDestroyed || showingDownloads ||
@@ -970,9 +986,8 @@ class MainActivity : AppCompatActivity() {
                 if (roleManager.isRoleHeld(RoleManager.ROLE_BROWSER)) {
                     Toast.makeText(this, "Browser is already the default", Toast.LENGTH_SHORT).show()
                 } else {
-                    startActivityForResult(
-                        roleManager.createRequestRoleIntent(RoleManager.ROLE_BROWSER),
-                        REQUEST_BROWSER_ROLE
+                    browserRoleLauncher.launch(
+                        roleManager.createRequestRoleIntent(RoleManager.ROLE_BROWSER)
                     )
                 }
                 return
@@ -1227,7 +1242,7 @@ class MainActivity : AppCompatActivity() {
                 Uri.parse("package:$packageName")
             )
         }
-        return Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
+        return Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, APK_MIME_TYPE)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
@@ -1908,7 +1923,6 @@ class MainActivity : AppCompatActivity() {
         const val PREFERENCES = "browser_preferences"
         const val HOME_URL = "https://www.google.com/"
         const val DOWNLOAD_NOTIFICATION_ID = 4103
-        const val REQUEST_BROWSER_ROLE = 4104
         const val REQUEST_OPEN_DOWNLOADS = 4106
         const val DOWNLOAD_NOTIFICATION_CHANNEL = "browser_downloads"
         const val APK_MIME_TYPE = "application/vnd.android.package-archive"

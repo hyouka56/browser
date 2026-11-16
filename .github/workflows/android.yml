@@ -89,8 +89,12 @@ jobs:
                   raise SystemExit(f"{apk}: expected {expected_abis}, found {abis}")
               print(f"{apk}: verified native ABI {abis}")
           PY
+          # JDK 25 warns when apksigner's bundled Conscrypt provider loads native code
+          # from the class path. Explicitly grant native access to unnamed modules.
+          export JDK_JAVA_OPTIONS="--enable-native-access=ALL-UNNAMED"
           "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --verbose "$PHONE_DEBUG"
           "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --verbose "$ARM64_DEBUG"
+          unset JDK_JAVA_OPTIONS
           "$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$PHONE_DEBUG" | grep -F "package: name='com.search.browser' versionCode='15' versionName='1.0.14'"
           cp "$PHONE_DEBUG" Browser-1.0.14-ARM32-TV-Lite-Debug-Signed.apk
           cp "$ARM64_DEBUG" Browser-1.0.14-ARM64-Debug-Signed.apk
