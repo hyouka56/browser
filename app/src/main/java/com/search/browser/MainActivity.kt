@@ -118,7 +118,7 @@ class MainActivity : AppCompatActivity() {
             isAppearanceLightNavigationBars = false
         }
 
-        adBlockingEnabled = preferences.getBoolean(KEY_AD_BLOCK, true)
+        adBlockingEnabled = if (BuildConfig.TV_LITE) false else preferences.getBoolean(KEY_AD_BLOCK, true)
         lastSuccessfulUrl = preferences.getString(KEY_LAST_URL, HOME_URL).orEmpty()
             .takeIf { it.startsWith("https://") || it.startsWith("http://") } ?: HOME_URL
         lastRequestedUrl = lastSuccessfulUrl
@@ -172,13 +172,17 @@ class MainActivity : AppCompatActivity() {
         // Prefer each site's native dark theme, then correct light surfaces and low-contrast
         // text at document start. The fallback changes colours only, never page geometry.
         instance.setBackgroundColor(Color.BLACK)
-        instance.setDarkMode(true)
+        if (!BuildConfig.TV_LITE) {
+            instance.setDarkMode(true)
+            runCatching {
+                val darkModeScript = assets.open("browser-dark-mode.js").bufferedReader().use { it.readText() }
+                instance.addDocumentStartJavaScript(darkModeScript, setOf("*"))
+                Log.i(TAG, "DARK_MODE_SCRIPT_REGISTERED allOrigins=true")
+            }.onFailure { Log.e(TAG, "DARK_MODE_SCRIPT_REGISTRATION_FAILED", it) }
+        } else {
+            Log.i(TAG, "TV_LITE: native page colors only; custom recoloring disabled")
+        }
         instance.setPageVisible(true)
-        runCatching {
-            val darkModeScript = assets.open("browser-dark-mode.js").bufferedReader().use { it.readText() }
-            instance.addDocumentStartJavaScript(darkModeScript, setOf("*"))
-            Log.i(TAG, "DARK_MODE_SCRIPT_REGISTERED allOrigins=true")
-        }.onFailure { Log.e(TAG, "DARK_MODE_SCRIPT_REGISTRATION_FAILED", it) }
         if (BuildConfig.DEBUG && intent.getBooleanExtra(EXTRA_TEST_DOWNLOAD_PAGE, false)) {
             instance.addDocumentStartJavaScript(
                 """
@@ -249,8 +253,8 @@ class MainActivity : AppCompatActivity() {
                 setOf("*")
             )
         }
-        instance.setAdBlockEnabled(adBlockingEnabled)
-        Log.i(TAG, "AD_BLOCK_CONFIG enabled=$adBlockingEnabled")
+        if (!BuildConfig.TV_LITE) instance.setAdBlockEnabled(adBlockingEnabled)
+        Log.i(TAG, "AD_BLOCK_CONFIG enabled=$adBlockingEnabled tvLite=${BuildConfig.TV_LITE}")
         browserSlot.addView(
             instance.getSurfaceContainer(),
             FrameLayout.LayoutParams(
@@ -597,6 +601,7 @@ class MainActivity : AppCompatActivity() {
 
         browserSlot = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         swipeRefresh = SwipeRefreshLayout(this).apply {
+            isEnabled = !BuildConfig.TV_LITE
             setColorSchemeColors(Color.WHITE)
             setProgressBackgroundColorSchemeColor(Color.rgb(24, 24, 24))
             setOnChildScrollUpCallback { _, _ -> browserSlot.canScrollVertically(-1) }
@@ -630,6 +635,7 @@ class MainActivity : AppCompatActivity() {
             addView(downloadsList)
         }
         downloadsSwipeRefresh = SwipeRefreshLayout(this).apply {
+            isEnabled = !BuildConfig.TV_LITE
             visibility = View.GONE
             setColorSchemeColors(Color.WHITE)
             setProgressBackgroundColorSchemeColor(Color.rgb(24, 24, 24))
@@ -729,6 +735,7 @@ class MainActivity : AppCompatActivity() {
         shieldButton = createIconButton(R.drawable.ic_shield, "Toggle ad blocker") {
             toggleAdBlocking()
         }
+        if (BuildConfig.TV_LITE) shieldButton.visibility = View.GONE
         bar.addView(shieldButton, LinearLayout.LayoutParams(dp(48), dp(54)).apply {
             marginStart = dp(8)
         })
@@ -1802,10 +1809,15 @@ class MainActivity : AppCompatActivity() {
         if (bold) setTypeface(typeface, Typeface.BOLD)
     }
 
-    private fun roundedBackground(fill: Int, radius: Int) = GradientDrawable().apply {
-        setColor(fill)
-        cornerRadius = radius.toFloat()
-    }
+    private fun roundedBackground(fill: Int, radius: Int): android.graphics.drawable.Drawable =
+        if (BuildConfig.TV_LITE) {
+            android.graphics.drawable.ColorDrawable(fill)
+        } else {
+            GradientDrawable().apply {
+                setColor(fill)
+                cornerRadius = radius.toFloat()
+            }
+        }
 
     private fun formatBytes(value: Long): String {
         if (value <= 0L) return "—"

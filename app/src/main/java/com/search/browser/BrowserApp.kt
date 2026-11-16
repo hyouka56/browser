@@ -17,6 +17,11 @@ class BrowserApp : Application() {
             return
         }
 
+        if (BuildConfig.TV_LITE) {
+            Log.i(TAG, "TV_LITE: skipping EasyList and YouTube ad-rule startup work")
+            return
+        }
+
         Log.i(TAG, "Initializing EasyList in main process: $processName")
         // EasyList is downloaded and cached by Cefrium. A failed refresh keeps
         // the last known-good list, when one exists.

@@ -11,9 +11,9 @@ android {
     defaultConfig {
         applicationId = "com.search.browser"
         minSdk = 29
-        targetSdk = 36
-        versionCode = 13
-        versionName = "1.0.12"
+        targetSdk = 35
+        versionCode = 14
+        versionName = "1.0.13"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -22,14 +22,17 @@ android {
         create("emulator") {
             dimension = "target"
             ndk { abiFilters += listOf("x86_64") }
+            buildConfigField("boolean", "TV_LITE", "false")
         }
         create("phone") {
             dimension = "target"
             ndk { abiFilters += listOf("armeabi-v7a") }
+            buildConfigField("boolean", "TV_LITE", "true")
         }
         create("arm64") {
             dimension = "target"
             ndk { abiFilters += listOf("arm64-v8a") }
+            buildConfigField("boolean", "TV_LITE", "false")
         }
     }
 
