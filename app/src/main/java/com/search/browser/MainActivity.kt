@@ -1093,17 +1093,12 @@ class MainActivity : AppCompatActivity() {
             )
             downloadsList.addView(selectionBar)
             downloadsList.addView(textView(
-                "Tap other completed files to add them to the selection.",
+                "Tap other download entries to add them to the selection.",
                 12f,
                 Color.rgb(155, 155, 155)
             ).apply { setPadding(0, dp(7), 0, dp(22)) })
         } else {
             downloadsList.addView(textView("Downloads", 24f, Color.WHITE, bold = true))
-            downloadsList.addView(textView(
-                "Files saved to Downloads · Long-press a completed file to select it",
-                13f,
-                Color.rgb(155, 155, 155)
-            ).apply { setPadding(0, dp(7), 0, dp(25)) })
         }
 
         if (downloadRecords.isEmpty()) {
@@ -1143,6 +1138,9 @@ class MainActivity : AppCompatActivity() {
         }, LinearLayout.LayoutParams(0, -2, 1f))
 
         val isReadyToSelect = record.complete && !pendingPublicSaveIds.contains(record.id)
+        val canSelectForDeletion = record.isSelectableForDeletion(
+            pendingPublicSaveIds.contains(record.id)
+        )
         val statusText = when {
             record.complete && !isReadyToSelect -> "SAVING"
             record.complete -> "DONE"
@@ -1177,11 +1175,11 @@ class MainActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(4)
             ))
 
-        } else if (isReadyToSelect) {
+        } else if (canSelectForDeletion) {
             card.isClickable = true
             card.isLongClickable = true
             card.setOnClickListener {
-                if (selectedDownloadIds.isNotEmpty()) {
+                if (selectedDownloadIds.isNotEmpty() || !isReadyToSelect) {
                     toggleDownloadSelection(record.id)
                 } else {
                     openDownloadedFile(record)
@@ -1215,6 +1213,13 @@ class MainActivity : AppCompatActivity() {
             card.addView(actions, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(42)
             ).apply { topMargin = dp(12) })
+        } else if (!record.complete && (record.canceled || record.interrupted) &&
+            !pendingPublicSaveIds.contains(record.id)) {
+            card.addView(downloadActionButton("Delete", Color.rgb(74, 36, 36)) {
+                confirmDeleteDownloads(listOf(record))
+            }, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(42)
+            ).apply { topMargin = dp(12) })
         }
 
         return LinearLayout(this).apply {
@@ -1239,27 +1244,33 @@ class MainActivity : AppCompatActivity() {
 
     private fun toggleDownloadSelection(downloadId: Int) {
         val record = downloadRecords[downloadId] ?: return
-        if (!record.complete || pendingPublicSaveIds.contains(downloadId)) return
+        if (!record.isSelectableForDeletion(pendingPublicSaveIds.contains(downloadId))) return
         if (!selectedDownloadIds.add(downloadId)) selectedDownloadIds.remove(downloadId)
         renderDownloads()
     }
 
     private fun confirmDeleteSelectedDownloads() {
         val selected = selectedDownloadIds.mapNotNull(downloadRecords::get)
-            .filter { it.complete && !pendingPublicSaveIds.contains(it.id) }
-        if (selected.isEmpty()) return
+        confirmDeleteDownloads(selected)
+    }
 
-        val title = if (selected.size == 1) "Delete downloaded file?" else "Delete ${selected.size} files?"
-        val message = if (selected.size == 1) {
-            "${selected.first().name} will be removed from the Downloads folder."
+    private fun confirmDeleteDownloads(records: List<DownloadRecord>) {
+        val deletable = records.filter {
+            it.isSelectableForDeletion(pendingPublicSaveIds.contains(it.id))
+        }
+        if (deletable.isEmpty()) return
+
+        val title = if (deletable.size == 1) "Delete download?" else "Delete ${deletable.size} downloads?"
+        val message = if (deletable.size == 1) {
+            "${deletable.first().name} and its temporary or saved file will be deleted."
         } else {
-            "The ${selected.size} selected files will be removed from the Downloads folder."
+            "The ${deletable.size} selected downloads and their temporary or saved files will be deleted."
         }
         AlertDialog.Builder(this)
             .setTitle(title)
             .setMessage(message)
             .setNegativeButton("Cancel", null)
-            .setPositiveButton("Delete") { _, _ -> deleteSelectedDownloads(selected) }
+            .setPositiveButton("Delete") { _, _ -> deleteSelectedDownloads(deletable) }
             .show()
     }
 
@@ -1270,7 +1281,7 @@ class MainActivity : AppCompatActivity() {
             val deletedIds = mutableListOf<Int>()
             val failedNames = mutableListOf<String>()
             records.forEach { record ->
-                if (deleteCompletedDownloadFile(record)) deletedIds += record.id
+                if (deleteDownloadRecordFile(record)) deletedIds += record.id
                 else failedNames += record.name
             }
             runOnUiThread {
@@ -1300,13 +1311,12 @@ class MainActivity : AppCompatActivity() {
         }, "delete-downloaded-files").start()
     }
 
-    private fun deleteCompletedDownloadFile(record: DownloadRecord): Boolean {
-        if (!record.complete || record.path.isBlank()) return false
+    private fun deleteDownloadRecordFile(record: DownloadRecord): Boolean {
+        if (record.path.isBlank()) return true
         return runCatching {
             if (record.path.startsWith("content://")) {
                 val uri = Uri.parse(record.path)
-                val deletedRows = contentResolver.delete(uri, null, null)
-                deletedRows > 0
+                contentResolver.delete(uri, null, null) > 0 || !isDownloadFileAvailable(record)
             } else {
                 val file = File(record.path).canonicalFile
                 val stagingDirectory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
@@ -1314,14 +1324,14 @@ class MainActivity : AppCompatActivity() {
                 val isOwnedStagingFile = file.parentFile == stagingDirectory.canonicalFile &&
                     file.name.startsWith("${record.id}-")
                 if (!isOwnedStagingFile) {
-                    Log.w(TAG, "Refusing to delete completed file outside app-owned storage id=${record.id}")
+                    Log.w(TAG, "Refusing to delete download outside app-owned staging storage id=${record.id}")
                     false
                 } else {
                     !file.exists() || file.delete()
                 }
             }
         }.onFailure {
-            Log.e(TAG, "Unable to delete completed download id=${record.id}", it)
+            Log.e(TAG, "Unable to delete download record id=${record.id}", it)
         }.getOrDefault(false)
     }
 
@@ -1352,7 +1362,6 @@ class MainActivity : AppCompatActivity() {
                 persistDownloads()
                 renderDownloads()
                 downloadsSwipeRefresh.isRefreshing = false
-                Toast.makeText(this, "Downloads refreshed", Toast.LENGTH_SHORT).show()
             }
         }, "refresh-downloads").start()
     }

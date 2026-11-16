@@ -77,14 +77,14 @@ jobs:
           APK="$(find app/build/outputs/apk/phone/release -maxdepth 1 -type f -name '*.apk' ! -name '*unsigned*' -print -quit)"
           test -n "$APK"
           "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --verbose --print-certs "$APK" | tee release-signature.txt
-          cp "$APK" Browser-1.0.8-ARM64-Release-Persistent-Signed.apk
+          cp "$APK" Browser-1.0.9-ARM64-Release-Persistent-Signed.apk
 
       - name: Upload persistently signed Release APK
         uses: actions/upload-artifact@v7
         with:
-          name: Browser-1.0.8-ARM64-Release-Persistent-Signed
+          name: Browser-1.0.9-ARM64-Release-Persistent-Signed
           path: |
-            Browser-1.0.8-ARM64-Release-Persistent-Signed.apk
+            Browser-1.0.9-ARM64-Release-Persistent-Signed.apk
             release-signature.txt
           if-no-files-found: error
           retention-days: 30
