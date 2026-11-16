@@ -101,10 +101,12 @@ adb shell am start -W -n "$ACTIVITY" \
   --ez com.search.browser.TEST_DOWNLOAD_PAGE true \
   2>&1 | tee "$ARTIFACTS/launch-download-test.txt"
 wait_for_log "PAGE_TITLE title=Download Test" 1 60
+wait_for_log "DOWNLOAD_HANDLER_REGISTERED" 1 30
 sleep 1
 
 # Test buttons fill two large fixed portions of the viewport to avoid layout-dependent taps.
 adb shell input tap 540 600
+wait_for_log "DOWNLOAD_BEFORE_CALLBACK id=" 1 60
 wait_for_log "DOWNLOAD_REQUEST_ACCEPTED name=download-test.txt" 1 60
 wait_for_log "DOWNLOAD_FILE_SAVED name=download-test.txt" 1 90
 adb shell content query \
@@ -287,6 +289,8 @@ report = {
         "text_file_download_saved": "DOWNLOAD_FILE_SAVED name=download-test.txt" in log,
         "apk_file_download_saved": "DOWNLOAD_FILE_SAVED name=download-test.apk" in log,
         "download_notification_posted": "DOWNLOAD_NOTIFICATION_POSTED name=download-test.apk" in log,
+        "download_handler_registered": "DOWNLOAD_HANDLER_REGISTERED" in log,
+        "download_callback_invoked": "DOWNLOAD_BEFORE_CALLBACK id=" in log,
     },
 }
 report["result"] = "PASS" if all(report["checks"].values()) else "FAIL"

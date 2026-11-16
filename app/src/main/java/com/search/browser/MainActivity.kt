@@ -43,7 +43,6 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
 import com.cefrium.CefriumBrowser
-import com.cefrium.CefriumDownloadClient
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -166,15 +165,13 @@ class MainActivity : AppCompatActivity() {
                             button.textContent = label;
                             button.style.cssText = `position:fixed;left:0;width:100vw;top:${'$'}{top};height:45vh;font-size:26px;background:#181818;color:#fff;border:2px solid #fff;z-index:2147483647;`;
                             button.addEventListener("click", () => {
-                                const blob = new Blob([content], { type: mimeType });
-                                const url = URL.createObjectURL(blob);
+                                const dataUrl = `data:${'$'}{mimeType};charset=utf-8,${'$'}{encodeURIComponent(content)}`;
                                 const link = document.createElement("a");
-                                link.href = url;
+                                link.href = dataUrl;
                                 link.download = fileName;
                                 document.body.appendChild(link);
                                 link.click();
                                 link.remove();
-                                setTimeout(() => URL.revokeObjectURL(url), 60000);
                             });
                             document.body.appendChild(button);
                         };
@@ -264,12 +261,17 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        instance.setDownloadClient(object : CefriumDownloadClient {
+        Log.i(TAG, "DOWNLOAD_HANDLER_REGISTERING")
+        instance.setDownloadHandler(object : CefriumBrowser.CefriumDownloadHandler {
             override fun onBeforeDownload(
-                browser: CefriumBrowser,
                 item: CefriumBrowser.DownloadItem,
                 callback: CefriumBrowser.BeforeDownloadCallback
             ) {
+                Log.i(
+                    TAG,
+                    "DOWNLOAD_BEFORE_CALLBACK id=${item.getId()} suggested=${item.getSuggestedName()} " +
+                        "url=${item.getUrl()} mimeType=${item.getMimeType()}"
+                )
                 val suggestedName = item.getSuggestedName().orEmpty()
                 val urlName = Uri.parse(item.getUrl().orEmpty()).lastPathSegment.orEmpty()
                 val mimeType = item.getMimeType().orEmpty()
@@ -295,24 +297,27 @@ class MainActivity : AppCompatActivity() {
                 val target = File(stagingDirectory, "$downloadId-$name")
                 target.delete()
                 activeDownloadItems[downloadId] = item
-                Log.i(TAG, "DOWNLOAD_REQUEST_ACCEPTED id=$downloadId name=$name mimeType=${DownloadFileSupport.mimeTypeFor(name, mimeType)} target=${target.absolutePath}")
+                Log.i(TAG, "DOWNLOAD_REQUEST_ACCEPTED name=$name id=$downloadId mimeType=${DownloadFileSupport.mimeTypeFor(name, mimeType)} target=${target.absolutePath}")
                 callback.allow(target.absolutePath)
             }
 
-            override fun onDownloadUpdated(
-                browser: CefriumBrowser,
-                item: CefriumBrowser.DownloadItem
-            ) {
+            override fun onDownloadUpdated(item: CefriumBrowser.DownloadItem) {
                 val path = item.getFullPath().orEmpty()
                 val pathName = path.takeIf { it.isNotBlank() }?.let { File(it).name }
-                val suggestedName = pathName ?: item.getSuggestedName().orEmpty()
+                val suggestedName = item.getSuggestedName().orEmpty().ifBlank { pathName.orEmpty() }
                 val urlName = Uri.parse(item.getUrl().orEmpty()).lastPathSegment.orEmpty()
                 val mimeType = item.getMimeType().orEmpty()
                 val name = DownloadFileSupport.normalizedName(suggestedName, urlName, mimeType)
                 val downloadId = item.getId()
                 runOnUiThread {
-                    if (!item.isComplete() && !item.isCanceled() && !item.isInterrupted()) {
-                        activeDownloadItems[downloadId] = item
+                    activeDownloadItems[downloadId] = item
+                    if (item.isComplete() || item.isCanceled() || item.isInterrupted()) {
+                        Log.i(
+                            TAG,
+                            "DOWNLOAD_ITEM_TERMINAL id=$downloadId name=$name complete=${item.isComplete()} " +
+                                "canceled=${item.isCanceled()} interrupted=${item.isInterrupted()} " +
+                                "reason=${item.getInterruptReason()} path=$path"
+                        )
                     }
                     updateDownloadRecord(
                         downloadId = downloadId,
@@ -326,6 +331,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         })
+        Log.i(TAG, "DOWNLOAD_HANDLER_REGISTERED")
 
         if (savedState != null && initialUrl == lastSuccessfulUrl) {
             instance.restoreState(savedState)
