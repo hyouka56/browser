@@ -175,11 +175,7 @@ jobs:
             sudo apt-get install -y libx11-dev libx11-xcb-dev
             mkdir -p "$HOME/.android"
             touch "$HOME/.android/emu-update-last-check.ini"
-            cat > "$HOME/.android/advancedFeatures.ini" <<'EOF'
-            Vulkan = on
-            GLDirectMem = on
-            QuickbootFileBacked = off
-            EOF
+            printf '%s\n' 'Vulkan = on' 'GLDirectMem = on' 'QuickbootFileBacked = off' > "$HOME/.android/advancedFeatures.ini"
             adb start-server
           disable-animations: true
           script: |
