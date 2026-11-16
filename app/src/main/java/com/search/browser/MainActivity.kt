@@ -43,6 +43,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
 import com.cefrium.CefriumBrowser
+import com.cefrium.CefriumDownloadClient
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -68,7 +69,7 @@ class MainActivity : AppCompatActivity() {
     private var testCrashTriggered = false
     private val preferences by lazy { getSharedPreferences(PREFERENCES, MODE_PRIVATE) }
     private val downloadRecords = LinkedHashMap<Int, DownloadRecord>()
-    private val activeDownloadItems = LinkedHashMap<String, CefriumBrowser.DownloadItem>()
+    private val activeDownloadItems = LinkedHashMap<Int, CefriumBrowser.DownloadItem>()
     private val pendingPublicSaveIds = mutableSetOf<Int>()
     private var adBlockingEnabled = true
     private var showingDownloads = false
@@ -263,8 +264,9 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        instance.setDownloadHandler(object : CefriumBrowser.CefriumDownloadHandler {
+        instance.setDownloadClient(object : CefriumDownloadClient {
             override fun onBeforeDownload(
+                browser: CefriumBrowser,
                 item: CefriumBrowser.DownloadItem,
                 callback: CefriumBrowser.BeforeDownloadCallback
             ) {
@@ -272,40 +274,50 @@ class MainActivity : AppCompatActivity() {
                 val urlName = Uri.parse(item.getUrl().orEmpty()).lastPathSegment.orEmpty()
                 val mimeType = item.getMimeType().orEmpty()
                 val name = DownloadFileSupport.normalizedName(suggestedName, urlName, mimeType)
+                val downloadId = item.getId()
 
                 val alreadyDownloading = activeDownloadItems.values.any {
                     !it.isComplete() && !it.isCanceled() && !it.isInterrupted()
                 }
                 if (alreadyDownloading) {
+                    Log.w(TAG, "DOWNLOAD_REQUEST_REJECTED id=$downloadId name=$name reason=another_download_active")
                     callback.cancel()
                     return
                 }
                 val stagingDirectory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
                     ?: File(filesDir, "downloads")
                 if (!stagingDirectory.exists() && !stagingDirectory.mkdirs()) {
+                    Log.e(TAG, "DOWNLOAD_REQUEST_REJECTED id=$downloadId name=$name reason=staging_directory_unavailable")
                     callback.cancel()
                     return
                 }
 
-                activeDownloadItems.clear()
-                downloadRecords.clear()
-                val target = File(stagingDirectory, item.getId().toString() + "-" + name)
+                val target = File(stagingDirectory, "$downloadId-$name")
                 target.delete()
-                activeDownloadItems[name] = item
-                Log.i(TAG, "DOWNLOAD_REQUEST_ACCEPTED name=$name mimeType=${DownloadFileSupport.mimeTypeFor(name, mimeType)}")
+                activeDownloadItems[downloadId] = item
+                Log.i(TAG, "DOWNLOAD_REQUEST_ACCEPTED id=$downloadId name=$name mimeType=${DownloadFileSupport.mimeTypeFor(name, mimeType)} target=${target.absolutePath}")
                 callback.allow(target.absolutePath)
             }
 
-            override fun onDownloadUpdated(item: CefriumBrowser.DownloadItem) {
-                val suggestedName = item.getSuggestedName().orEmpty()
+            override fun onDownloadUpdated(
+                browser: CefriumBrowser,
+                item: CefriumBrowser.DownloadItem
+            ) {
+                val path = item.getFullPath().orEmpty()
+                val pathName = path.takeIf { it.isNotBlank() }?.let { File(it).name }
+                val suggestedName = pathName ?: item.getSuggestedName().orEmpty()
                 val urlName = Uri.parse(item.getUrl().orEmpty()).lastPathSegment.orEmpty()
                 val mimeType = item.getMimeType().orEmpty()
                 val name = DownloadFileSupport.normalizedName(suggestedName, urlName, mimeType)
+                val downloadId = item.getId()
                 runOnUiThread {
-                    activeDownloadItems[name] = item
+                    if (!item.isComplete() && !item.isCanceled() && !item.isInterrupted()) {
+                        activeDownloadItems[downloadId] = item
+                    }
                     updateDownloadRecord(
+                        downloadId = downloadId,
                         name = name,
-                        path = item.getFullPath().orEmpty(),
+                        path = path,
                         percent = item.getPercentComplete().coerceIn(0, 100),
                         complete = item.isComplete(),
                         canceled = item.isCanceled(),
@@ -731,6 +743,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateDownloadRecord(
+        downloadId: Int,
         name: String,
         path: String,
         percent: Int,
@@ -739,8 +752,8 @@ class MainActivity : AppCompatActivity() {
         mimeType: String
     ) {
         requestDownloadNotificationPermissionIfNeeded()
-        val item = activeDownloadItems[name]
-        val id = item?.getId() ?: (path.ifBlank { name }).hashCode()
+        val item = activeDownloadItems[downloadId]
+        val id = downloadId
         val record = downloadRecords[id] ?: DownloadRecord(
             id = id,
             name = name.ifBlank { "Download" },
@@ -780,7 +793,7 @@ class MainActivity : AppCompatActivity() {
 
         downloadRecords[id] = record
         if (record.complete || record.canceled || record.interrupted) {
-            activeDownloadItems.remove(name)
+            activeDownloadItems.remove(downloadId)
         }
         if (record.complete && !record.path.startsWith("content://")) {
             persistDownloads()
