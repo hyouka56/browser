@@ -169,14 +169,14 @@ adb shell input tap 540 1900
 wait_for_log "DOWNLOAD_BACKGROUND_ALLOW_DELAYED" 1 30
 wait_for_log "DOWNLOAD_KEEP_ALIVE_SERVICE_STARTED" 1 30
 wait_for_log "DOWNLOAD_KEEP_ALIVE_REQUESTED" 1 30
-TASK_ID="$(adb shell dumpsys activity activities | grep -F "$PACKAGE/.MainActivity" | sed -E 's/.* t([0-9]+).*/\1/' | head -n1 | tr -d '\r')"
-if [[ -z "$TASK_ID" ]]; then
-  echo "Could not determine the Browser task ID for the close-app download test." >&2
+STACK_ID="$(adb shell dumpsys activity activities | grep -F "$PACKAGE" | grep -E 'StackId=[0-9]+' | sed -E 's/.*StackId=([0-9]+).*/\1/' | head -n1 | tr -d '\r')"
+if [[ -z "$STACK_ID" ]]; then
+  echo "Could not determine the Browser stack ID for the close-app download test." >&2
   adb shell dumpsys activity activities >&2 || true
   exit 1
 fi
-echo "Removing Browser task $TASK_ID while download is pending."
-adb shell am task remove "$TASK_ID"
+echo "Removing Browser task stack $STACK_ID while download is pending."
+adb shell am stack remove "$STACK_ID"
 wait_for_log "BROWSER_CLOSE_DEFERRED_FOR_DOWNLOAD" 1 30
 wait_for_log "DOWNLOAD_KEEP_ALIVE_TASK_REMOVED" 1 30
 wait_for_log "DOWNLOAD_BACKGROUND_ALLOWING" 1 30
