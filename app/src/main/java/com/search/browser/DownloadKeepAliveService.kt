@@ -28,7 +28,7 @@ class DownloadKeepAliveService : Service() {
         val name = intent?.getStringExtra(EXTRA_DOWNLOAD_NAME)
             ?.takeIf { it.isNotBlank() } ?: "Active download"
         val openDownloads = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             putExtra(EXTRA_SHOW_DOWNLOADS, true)
         }
         val contentIntent = PendingIntent.getActivity(
