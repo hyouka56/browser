@@ -143,10 +143,13 @@ jobs:
         uses: actions/checkout@v7.0.1
 
       - name: Download emulator APK
-        uses: actions/download-artifact@v8.0.2
-        with:
-          name: Browser-1.0.14-x86_64-Emulator-Debug
-          path: ${{ runner.temp }}/browser-apk
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "Browser-1.0.14-x86_64-Emulator-Debug" \
+            --dir "$RUNNER_TEMP/browser-apk"
 
       - name: Enable KVM
         run: |
@@ -162,7 +165,7 @@ jobs:
           arch: x86_64
           profile: pixel_5
           force-avd-creation: true
-          emulator-options: -no-window -gpu swiftshader -noaudio -no-boot-anim -no-metrics -no-snapshot -camera-back none -camera-front none
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-metrics -no-snapshot -camera-back none -camera-front none
           pre-emulator-launch-script: |
             sudo apt-get install -y libx11-dev libx11-xcb-dev
             mkdir -p "$HOME/.android"
