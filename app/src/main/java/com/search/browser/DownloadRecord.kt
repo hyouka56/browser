@@ -16,5 +16,6 @@ data class DownloadRecord(
     var canceled: Boolean,
     var interrupted: Boolean,
     var updatedAt: Long,
+    var mimeType: String = "application/octet-stream",
     @Transient var liveItem: CefriumBrowser.DownloadItem? = null
 )

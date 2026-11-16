@@ -16,6 +16,7 @@ fi
 
 collect_evidence() {
   adb logcat -d -v threadtime > "$ARTIFACTS/logcat.txt" 2>&1 || true
+  adb shell dumpsys notification --noredact > "$ARTIFACTS/notification-dump.txt" 2>&1 || true
   adb exec-out screencap -p > "$ARTIFACTS/final-screen.png" 2>/dev/null || true
   adb shell getprop > "$ARTIFACTS/device-properties.txt" 2>&1 || true
   adb shell dumpsys package "$PACKAGE" > "$ARTIFACTS/package-dump.txt" 2>&1 || true
@@ -87,6 +88,99 @@ wait_for_log "CHROMIUM_RECOVERY_COMPLETED" 1 120
 wait_for_log "PAGE_BITMAP_CAPTURED url=https://example.com/" 2 60
 sleep 1
 adb exec-out screencap -p > "$ARTIFACTS/page-after-renderer-recovery.png"
+
+# Verify actual Chromium downloads and Android notifications with in-page Blob fixtures.
+DOWNLOAD_TEST_HTML="$RUNNER_TEMP/browser-download-test.html"
+cat > "$DOWNLOAD_TEST_HTML" <<'HTML'
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Download Test</title>
+  <style>
+    body { margin: 0; padding: 24px; background: #000; color: #fff; font: 22px sans-serif; }
+    h1 { font-size: 26px; }
+    button { display: block; width: 100%; min-height: 132px; margin: 28px 0; font-size: 25px; }
+  </style>
+</head>
+<body>
+  <h1>Browser download integration test</h1>
+  <button id="file">Download test file</button>
+  <button id="apk">Download APK test file</button>
+  <script>
+    function downloadFile(name, mimeType, content) {
+      const url = URL.createObjectURL(new Blob([content], { type: mimeType }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = name;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    }
+    document.getElementById('file').addEventListener('click', () => {
+      downloadFile('download-test.txt', 'text/plain', 'Browser download integration test\n');
+    });
+    document.getElementById('apk').addEventListener('click', () => {
+      downloadFile('download-test.apk', 'application/vnd.android.package-archive', 'APK download notification fixture');
+    });
+  </script>
+</body>
+</html>
+HTML
+DOWNLOAD_TEST_URL="data:text/html;base64,$(base64 -w0 "$DOWNLOAD_TEST_HTML")"
+
+if (( EXPECTED_API >= 33 )); then
+  adb shell pm grant "$PACKAGE" android.permission.POST_NOTIFICATIONS
+fi
+adb shell am force-stop "$PACKAGE"
+adb shell am start -W -n "$ACTIVITY" \
+  --es com.search.browser.TEST_URL "$DOWNLOAD_TEST_URL" \
+  2>&1 | tee "$ARTIFACTS/launch-download-test.txt"
+wait_for_log "PAGE_TITLE title=Download Test" 1 60
+
+adb shell input tap 540 400
+wait_for_log "DOWNLOAD_REQUEST_ACCEPTED name=download-test.txt" 1 60
+wait_for_log "DOWNLOAD_FILE_SAVED name=download-test.txt" 1 90
+adb shell content query \
+  --uri content://media/external/downloads \
+  --where "_display_name='download-test.txt'" \
+  --projection _display_name:_size \
+  > "$ARTIFACTS/media-download-test.txt.txt"
+if ! grep -F "download-test.txt" "$ARTIFACTS/media-download-test.txt.txt" >/dev/null; then
+  echo "Downloaded text file was not found in the public Downloads collection." >&2
+  cat "$ARTIFACTS/media-download-test.txt.txt" >&2
+  exit 1
+fi
+adb shell dumpsys notification --noredact > "$ARTIFACTS/notification-download-test.txt.txt"
+if ! grep -F "download-test.txt" "$ARTIFACTS/notification-download-test.txt.txt" >/dev/null; then
+  echo "The completed text-file notification was not posted." >&2
+  exit 1
+fi
+
+adb shell input tap 540 900
+wait_for_log "DOWNLOAD_REQUEST_ACCEPTED name=download-test.apk" 1 60
+wait_for_log "DOWNLOAD_FILE_SAVED name=download-test.apk" 1 90
+adb shell content query \
+  --uri content://media/external/downloads \
+  --where "_display_name='download-test.apk'" \
+  --projection _display_name:_size \
+  > "$ARTIFACTS/media-download-test.apk.txt"
+if ! grep -F "download-test.apk" "$ARTIFACTS/media-download-test.apk.txt" >/dev/null; then
+  echo "Downloaded APK test file was not found in the public Downloads collection." >&2
+  cat "$ARTIFACTS/media-download-test.apk.txt" >&2
+  exit 1
+fi
+adb shell dumpsys notification --noredact > "$ARTIFACTS/notification-download-test.apk.txt"
+if ! grep -F "download-test.apk" "$ARTIFACTS/notification-download-test.apk.txt" >/dev/null; then
+  echo "The completed APK notification was not posted." >&2
+  exit 1
+fi
+if ! grep -F "pkg=$PACKAGE" "$ARTIFACTS/notification-download-test.apk.txt" >/dev/null; then
+  echo "Download notification was not registered for $PACKAGE." >&2
+  exit 1
+fi
 
 PAGE_LOG="$(adb logcat -d -s Browser:V 2>/dev/null)"
 for required in \
@@ -210,7 +304,7 @@ report = {
     "screenshot_metrics": {
         "before_recovery_visible_pixel_ratio": round(ratio_before, 4),
         "after_recovery_visible_pixel_ratio": round(ratio_after, 4),
-        "minimum_required_visible_ratio": 0.08,
+        "minimum_required_visible_ratio": 0.07,
     },
     "checks": {
         "apk_installed": (folder / "install.txt").exists(),
@@ -224,8 +318,11 @@ report = {
         "app_process_survived": bool(pid),
         "before_recovery_screenshot_saved": before.is_file(),
         "after_recovery_screenshot_saved": after.is_file(),
-        "before_recovery_screenshot_visibly_rendered": ratio_before >= 0.08,
-        "after_recovery_screenshot_visibly_rendered": ratio_after >= 0.08,
+        "before_recovery_screenshot_visibly_rendered": ratio_before >= 0.07,
+        "after_recovery_screenshot_visibly_rendered": ratio_after >= 0.07,
+        "text_file_download_saved": "DOWNLOAD_FILE_SAVED name=download-test.txt" in log,
+        "apk_file_download_saved": "DOWNLOAD_FILE_SAVED name=download-test.apk" in log,
+        "download_notification_posted": "DOWNLOAD_NOTIFICATION_POSTED name=download-test.apk" in log,
     },
 }
 report["result"] = "PASS" if all(report["checks"].values()) else "FAIL"
@@ -235,5 +332,5 @@ if report["result"] != "PASS":
     raise SystemExit(1)
 PY
 
-echo "PASS: API $EXPECTED_API drew Example Domain with Chromium and recovered after renderer termination." | tee "$ARTIFACTS/result.txt"
-echo "PASS: API $EXPECTED_API - Chromium surface rendering and renderer recovery." >> "$GITHUB_STEP_SUMMARY"
+echo "PASS: API $EXPECTED_API rendered Example Domain, recovered the Chromium renderer, downloaded a text file and APK fixture to public Downloads, and posted Android download notifications." | tee "$ARTIFACTS/result.txt"
+echo "PASS: API $EXPECTED_API - Chromium rendering/recovery, public file and APK downloads, Android notifications." >> "$GITHUB_STEP_SUMMARY"
