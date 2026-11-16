@@ -74,6 +74,7 @@ wait_for_log() {
 wait_for_log "CEF_ENGINE version=0.20.0 chromium=156.0.8078.88" 1 90
 wait_for_log "PAGE_TITLE title=Example Domain" 1 120
 wait_for_log "PAGE_LOAD_STATE loading=false" 1 120
+wait_for_log "DARK_MODE_VERIFICATION url=https://example.com/ result=" 1 60
 wait_for_log "PAGE_BITMAP_CAPTURED url=https://example.com/" 1 60
 wait_for_log "TEST_RENDERER_CRASH_ARMED" 1 30
 sleep 1
@@ -85,6 +86,7 @@ wait_for_log "CHROMIUM_RENDERER_TERMINATED" 1 60
 wait_for_log "CHROMIUM_RECOVERY_STARTED" 1 30
 wait_for_log "PAGE_TITLE title=Example Domain" 2 120
 wait_for_log "CHROMIUM_RECOVERY_COMPLETED" 1 120
+wait_for_log "DARK_MODE_VERIFICATION url=https://example.com/ result=" 2 60
 wait_for_log "PAGE_BITMAP_CAPTURED url=https://example.com/" 2 60
 sleep 1
 adb exec-out screencap -p > "$ARTIFACTS/page-after-renderer-recovery.png"
@@ -165,6 +167,7 @@ for required in \
   "CEF_ENGINE version=0.20.0 chromium=156.0.8078.88" \
   "PAGE_TITLE title=Example Domain" \
   "PAGE_LOAD_STATE loading=false" \
+  "DARK_MODE_VERIFICATION url=https://example.com/ result=" \
   "CHROMIUM_RENDERER_TERMINATED" \
   "CHROMIUM_RECOVERY_STARTED" \
   "CHROMIUM_RECOVERY_COMPLETED"; do
@@ -173,6 +176,18 @@ for required in \
     exit 1
   fi
 done
+
+DARK_MODE_LOG="$(grep -F "DARK_MODE_VERIFICATION url=https://example.com/ result=" <<<"$PAGE_LOG" | head -n1 || true)"
+if ! grep -F '"installed":true' <<<"$DARK_MODE_LOG" >/dev/null; then
+  echo "The adaptive dark-mode document-start script was not active on the page." >&2
+  echo "$DARK_MODE_LOG" >&2
+  exit 1
+fi
+if ! grep -F '"colorScheme":"dark"' <<<"$DARK_MODE_LOG" >/dev/null; then
+  echo "The page did not report a dark preferred color scheme." >&2
+  echo "$DARK_MODE_LOG" >&2
+  exit 1
+fi
 
 adb logcat -d -v threadtime > "$ARTIFACTS/logcat.txt" 2>&1
 if grep -F "FATAL EXCEPTION" "$ARTIFACTS/logcat.txt" >/dev/null; then
@@ -289,6 +304,8 @@ report = {
         "cefrium_chromium_engine_logged": "CEF_ENGINE version=0.20.0 chromium=156.0.8078.88" in log,
         "page_title_verified": "PAGE_TITLE title=Example Domain" in log,
         "page_load_completed": "PAGE_LOAD_STATE loading=false" in log,
+        "dark_mode_document_script_installed": log.count("DARK_MODE_VERIFICATION url=https://example.com/ result=") >= 2 and '"installed":true' in log,
+        "dark_mode_preferred_scheme_enabled": '"colorScheme":"dark"' in log,
         "surface_bitmap_captured_before_crash": log.count("PAGE_BITMAP_CAPTURED url=https://example.com/") >= 1,
         "renderer_termination_callback": "CHROMIUM_RENDERER_TERMINATED" in log,
         "fresh_browser_created": "CHROMIUM_RECOVERY_STARTED" in log,
@@ -312,5 +329,5 @@ if report["result"] != "PASS":
     raise SystemExit(1)
 PY
 
-echo "PASS: API $EXPECTED_API rendered Example Domain, recovered the Chromium renderer, downloaded a text file and APK fixture to public Downloads, and posted Android download notifications." | tee "$ARTIFACTS/result.txt"
-echo "PASS: API $EXPECTED_API - Chromium rendering/recovery, public file and APK downloads, Android notifications." >> "$GITHUB_STEP_SUMMARY"
+echo "PASS: API $EXPECTED_API rendered Example Domain in dark mode, recovered the Chromium renderer, downloaded test files to public Downloads, and posted Android notifications." | tee "$ARTIFACTS/result.txt"
+echo "PASS: API $EXPECTED_API - adaptive dark mode, Chromium rendering/recovery, public file and APK downloads, Android notifications." >> "$GITHUB_STEP_SUMMARY"

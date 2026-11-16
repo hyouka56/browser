@@ -47,6 +47,9 @@ jobs:
           test -x "$ANDROID_HOME/build-tools/37.0.0/apksigner"
           test -x "$ANDROID_HOME/build-tools/37.0.0/aapt"
 
+      - name: Validate adaptive dark-mode script syntax
+        run: node --check app/src/main/assets/browser-dark-mode.js
+
       - name: Run unit tests and build installable APKs
         run: gradle --no-daemon clean testEmulatorDebugUnitTest assembleEmulatorDebug assemblePhoneDebug
 
@@ -78,21 +81,21 @@ jobs:
               print(f"{apk}: verified native ABI {abis}")
           PY
           "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --verbose "$PHONE_DEBUG"
-          "$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$PHONE_DEBUG" | grep -F "package: name='com.search.browser' versionCode='8' versionName='1.0.7'"
-          cp "$PHONE_DEBUG" Browser-1.0.7-ARM64-Debug-Signed.apk
+          "$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$PHONE_DEBUG" | grep -F "package: name='com.search.browser' versionCode='9' versionName='1.0.8'"
+          cp "$PHONE_DEBUG" Browser-1.0.8-ARM64-Debug-Signed.apk
 
       - name: Upload installable ARM64 APK
         uses: actions/upload-artifact@v7
         with:
-          name: Browser-1.0.7-ARM64-Debug-Signed
-          path: Browser-1.0.7-ARM64-Debug-Signed.apk
+          name: Browser-1.0.8-ARM64-Debug-Signed
+          path: Browser-1.0.8-ARM64-Debug-Signed.apk
           if-no-files-found: error
           retention-days: 14
 
       - name: Upload emulator APK
         uses: actions/upload-artifact@v7
         with:
-          name: Browser-1.0.7-x86_64-Emulator-Debug
+          name: Browser-1.0.8-x86_64-Emulator-Debug
           path: app/build/outputs/apk/emulator/debug/app-emulator-debug.apk
           if-no-files-found: error
           retention-days: 14
@@ -124,7 +127,7 @@ jobs:
       - name: Download emulator APK
         uses: actions/download-artifact@v7
         with:
-          name: Browser-1.0.7-x86_64-Emulator-Debug
+          name: Browser-1.0.8-x86_64-Emulator-Debug
           path: ${{ runner.temp }}/browser-apk
 
       - name: Enable KVM

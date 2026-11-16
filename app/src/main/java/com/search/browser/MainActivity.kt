@@ -128,9 +128,15 @@ class MainActivity : AppCompatActivity() {
     private fun attachBrowser(initialUrl: String, savedState: Bundle? = null) {
         val instance = CefriumBrowser.createWithSurface(this)
         browser = instance
-        // Keep the browser surface black while allowing each website to use its own theme.
+        // Prefer each site's native dark theme, then correct light surfaces and low-contrast
+        // text at document start. The fallback changes colours only, never page geometry.
         instance.setBackgroundColor(Color.BLACK)
-        instance.setDarkMode(false)
+        instance.setDarkMode(true)
+        runCatching {
+            val darkModeScript = assets.open("browser-dark-mode.js").bufferedReader().use { it.readText() }
+            instance.addDocumentStartJavaScript(darkModeScript, setOf("*"))
+            Log.i(TAG, "DARK_MODE_SCRIPT_REGISTERED allOrigins=true")
+        }.onFailure { Log.e(TAG, "DARK_MODE_SCRIPT_REGISTRATION_FAILED", it) }
         if (BuildConfig.DEBUG && intent.getBooleanExtra(EXTRA_TEST_DOWNLOAD_PAGE, false)) {
             instance.addDocumentStartJavaScript(
                 """
@@ -230,6 +236,20 @@ class MainActivity : AppCompatActivity() {
                     if (::swipeRefresh.isInitialized) swipeRefresh.isRefreshing = false
                     val pageUrl = instance.getUrl().orEmpty().ifBlank { lastRequestedUrl }
                     if (pageUrl.startsWith("https://") || pageUrl.startsWith("http://")) {
+                        browserSlot.post {
+                            if (::browser.isInitialized && browser === instance) {
+                                runCatching {
+                                    instance.evaluateJavaScript(
+                                        "({installed: window.__searchBrowserDarkModeV1 === true, " +
+                                            "colorScheme: getComputedStyle(document.documentElement).colorScheme})"
+                                    ) { result ->
+                                        Log.i(TAG, "DARK_MODE_VERIFICATION url=$pageUrl result=$result")
+                                    }
+                                }.onFailure {
+                                    Log.w(TAG, "DARK_MODE_VERIFICATION_FAILED url=$pageUrl", it)
+                                }
+                            }
+                        }
                         lastSuccessfulUrl = pageUrl
                         preferences.edit().putString(KEY_LAST_URL, pageUrl).apply()
                         if (rendererRecoveryPending) {
