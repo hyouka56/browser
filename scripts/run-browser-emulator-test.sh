@@ -165,7 +165,7 @@ fi
 # Start a delayed debug download, then remove the Activity task while the
 # transfer is pending. The foreground service must keep Cefrium alive until
 # the file is copied into the public Downloads directory.
-adb shell input tap 540 2200
+adb shell input tap 540 1900
 wait_for_log "DOWNLOAD_BACKGROUND_ALLOW_DELAYED" 1 30
 wait_for_log "DOWNLOAD_KEEP_ALIVE_SERVICE_STARTED" 1 30
 wait_for_log "DOWNLOAD_KEEP_ALIVE_REQUESTED" 1 30
