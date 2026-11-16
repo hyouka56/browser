@@ -278,11 +278,16 @@ class MainActivity : AppCompatActivity() {
                 val name = DownloadFileSupport.normalizedName(suggestedName, urlName, mimeType)
                 val downloadId = item.getId()
 
-                val alreadyDownloading = activeDownloadItems.values.any {
-                    !it.isComplete() && !it.isCanceled() && !it.isInterrupted()
+                val otherActiveDownload = activeDownloadItems.entries.firstOrNull { (activeId, activeItem) ->
+                    activeId != downloadId &&
+                        !activeItem.isComplete() && !activeItem.isCanceled() && !activeItem.isInterrupted()
                 }
-                if (alreadyDownloading) {
-                    Log.w(TAG, "DOWNLOAD_REQUEST_REJECTED id=$downloadId name=$name reason=another_download_active")
+                if (otherActiveDownload != null) {
+                    Log.w(
+                        TAG,
+                        "DOWNLOAD_REQUEST_REJECTED id=$downloadId name=$name " +
+                            "reason=another_download_active activeId=${otherActiveDownload.key}"
+                    )
                     callback.cancel()
                     return
                 }
