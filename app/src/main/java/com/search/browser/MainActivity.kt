@@ -448,8 +448,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startDownloadKeepAliveService(name: String, privateMode: Boolean = false): Boolean {
+        val displayName = if (privateMode) "Private download in progress" else name
         return runCatching {
-            val displayName = if (privateMode) "Private download in progress" else name
             val started = DownloadKeepAliveService.start(this, displayName)
             if (started) {
                 downloadKeepAliveStarted = true
@@ -477,7 +477,7 @@ class MainActivity : AppCompatActivity() {
         if (activityDestroying && browserCloseDeferredForDownload) {
             DownloadKeepAliveService.releaseBrowser(this)
             val retained = browserToCloseAfterDownload
-            runCatching { retained?.let { if (!it.isClosed()) it.close() } }
+            runCatching { retained?.close() }
                 .onFailure { Log.e(TAG, "BROWSER_CLOSE_AFTER_DOWNLOAD_FAILED", it) }
             browserToCloseAfterDownload = null
             browserCloseDeferredForDownload = false
@@ -843,7 +843,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun switchWindow(windowId: Int) {
         val target = browserWindows.firstOrNull { it.id == windowId } ?: return
-        if (windowId == activeWindowId || target.browser.isClosed()) return
+        if (windowId == activeWindowId) return
 
         browserWindows.firstOrNull { it.id == activeWindowId }?.browser?.let { current ->
             if (!hasActiveDownloadForBrowser(current)) current.onPause()
@@ -884,7 +884,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         browserWindows.removeAll { it.id == target.id }
-        runCatching { if (!target.browser.isClosed()) target.browser.close() }
+        runCatching { target.browser.close() }
             .onFailure { Log.w(TAG, "Unable to close browser window id=${target.id}", it) }
 
         if (target.incognito && browserWindows.none { it.incognito }) {
@@ -1859,7 +1859,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         val activeWindow = browserWindows.firstOrNull { it.id == activeWindowId }
-        if (activeWindow != null && !activeWindow.incognito && !activeWindow.browser.isClosed()) {
+        if (activeWindow != null && !activeWindow.incognito) {
             outState.putBundle(KEY_BROWSER_STATE, activeWindow.browser.saveState())
             preferences.edit().putString(KEY_LAST_URL, lastSuccessfulUrl).apply()
         }
@@ -1877,7 +1877,7 @@ class MainActivity : AppCompatActivity() {
             browserToCloseAfterDownload = retained
             browserCloseDeferredForDownload = true
             browserWindows.forEach { window ->
-                if (window.browser !== retained) runCatching { if (!window.browser.isClosed()) window.browser.close() }
+                if (window.browser !== retained) runCatching { window.browser.close() }
             }
             Log.i(TAG, "BROWSER_CLOSE_DEFERRED_FOR_DOWNLOAD pendingSave=${pendingPublicSaveIds.isNotEmpty()}")
         } else {
@@ -1885,7 +1885,7 @@ class MainActivity : AppCompatActivity() {
             DownloadKeepAliveService.releaseBrowser(this)
             downloadKeepAliveStarted = false
             browserWindows.forEach { window ->
-                runCatching { if (!window.browser.isClosed()) window.browser.close() }
+                runCatching { window.browser.close() }
             }
         }
         browserWindows.clear()

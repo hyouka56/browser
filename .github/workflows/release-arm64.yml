@@ -70,7 +70,7 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: gradle --no-daemon clean :app:assembleArm64Release
 
-      - name: Verify and prepare signed ARM32 Release APK
+      - name: Verify and prepare signed ARM64 Release APK
         shell: bash
         run: |
           set -euo pipefail
