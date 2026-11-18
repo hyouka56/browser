@@ -180,19 +180,10 @@ class MainActivity : AppCompatActivity() {
         searchField.setText(initialUrl)
         browserSlot.removeAllViews()
         updateWindowsButton()
-        // Prefer each site's native dark theme, then correct light surfaces and low-contrast
-        // text at document start. The fallback changes colours only, never page geometry.
-        instance.setBackgroundColor(Color.BLACK)
-        if (!BuildConfig.TV_LITE) {
-            instance.setDarkMode(true)
-            runCatching {
-                val darkModeScript = assets.open("browser-dark-mode.js").bufferedReader().use { it.readText() }
-                instance.addDocumentStartJavaScript(darkModeScript, setOf("*"))
-                Log.i(TAG, "DARK_MODE_SCRIPT_REGISTERED allOrigins=true")
-            }.onFailure { Log.e(TAG, "DARK_MODE_SCRIPT_REGISTRATION_FAILED", it) }
-        } else {
-            Log.i(TAG, "TV_LITE: native page colors only; custom recoloring disabled")
-        }
+        // Keep every website in its native light color scheme; never inject page recoloring.
+        instance.setBackgroundColor(Color.WHITE)
+        instance.setDarkMode(false)
+        Log.i(TAG, "LIGHT_MODE_ENABLED nativePageColors=true")
         instance.setPageVisible(true)
         if (BuildConfig.DEBUG && intent.getBooleanExtra(EXTRA_TEST_DOWNLOAD_PAGE, false)) {
             instance.addDocumentStartJavaScript(
@@ -205,8 +196,8 @@ class MainActivity : AppCompatActivity() {
                         Object.assign(document.body.style, {
                             margin: "0",
                             padding: "0",
-                            background: "#000",
-                            color: "#fff",
+                            background: "#fff",
+                            color: "#202124",
                             overflow: "hidden"
                         });
 
@@ -214,7 +205,7 @@ class MainActivity : AppCompatActivity() {
                             const button = document.createElement("button");
                             button.id = id;
                             button.textContent = label;
-                            button.style.cssText = `position:fixed;left:0;width:100vw;top:${'$'}{top};height:${'$'}{height};font-size:20px;background:#181818;color:#fff;border:2px solid #fff;z-index:2147483647;`;
+                            button.style.cssText = `position:fixed;left:0;width:100vw;top:${'$'}{top};height:${'$'}{height};font-size:20px;background:#f1f3f4;color:#202124;border:2px solid #dadce0;z-index:2147483647;`;
                             button.addEventListener("click", () => {
                                 const dataUrl = `data:${'$'}{mimeType};charset=utf-8,${'$'}{encodeURIComponent(content)}`;
                                 const link = document.createElement("a");
@@ -607,17 +598,17 @@ class MainActivity : AppCompatActivity() {
     private fun buildLayout() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.BLACK)
+            setBackgroundColor(Color.WHITE)
         }
         setContentView(root)
 
-        val content = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        val content = FrameLayout(this).apply { setBackgroundColor(Color.WHITE) }
         root.addView(content, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
         ))
 
         // Let Cefrium own browser gestures. Its native refresh only fires at the web-page top.
-        browserSlot = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        browserSlot = FrameLayout(this).apply { setBackgroundColor(Color.WHITE) }
         content.addView(browserSlot, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT
@@ -626,19 +617,19 @@ class MainActivity : AppCompatActivity() {
         downloadsList = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(22), dp(18), dp(24))
-            setBackgroundColor(Color.BLACK)
+            setBackgroundColor(Color.WHITE)
         }
         downloadsPanel = ScrollView(this).apply {
             visibility = View.GONE
             isFillViewport = true
-            setBackgroundColor(Color.BLACK)
+            setBackgroundColor(Color.WHITE)
             addView(downloadsList)
         }
         downloadsSwipeRefresh = SwipeRefreshLayout(this).apply {
             isEnabled = !BuildConfig.TV_LITE
             visibility = View.GONE
-            setColorSchemeColors(Color.WHITE)
-            setProgressBackgroundColorSchemeColor(Color.rgb(24, 24, 24))
+            setColorSchemeColors(Color.rgb(26, 115, 232))
+            setProgressBackgroundColorSchemeColor(Color.rgb(218, 220, 224))
             setOnChildScrollUpCallback { _, _ -> downloadsPanel.canScrollVertically(-1) }
             setOnRefreshListener { refreshDownloads() }
             addView(downloadsPanel, ViewGroup.LayoutParams(
@@ -653,24 +644,24 @@ class MainActivity : AppCompatActivity() {
 
         rendererErrorPanel = FrameLayout(this).apply {
             visibility = View.GONE
-            setBackgroundColor(Color.BLACK)
+            setBackgroundColor(Color.WHITE)
             val message = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
                 setPadding(dp(28), dp(24), dp(28), dp(24))
-                addView(textView("Page stopped unexpectedly", 18f, Color.WHITE, bold = true))
+                addView(textView("Page stopped unexpectedly", 18f, Color.rgb(32, 33, 36), bold = true))
                 addView(textView(
                     "Chromium stopped rendering this page. Reload to continue.",
                     13f,
-                    Color.rgb(170, 170, 170)
+                    Color.rgb(95, 99, 104)
                 ).apply {
                     gravity = Gravity.CENTER
                     setPadding(0, dp(9), 0, dp(20))
                 })
-                addView(textView("RELOAD PAGE", 12f, Color.WHITE, bold = true).apply {
+                addView(textView("RELOAD PAGE", 12f, Color.rgb(32, 33, 36), bold = true).apply {
                     gravity = Gravity.CENTER
                     setPadding(dp(20), dp(12), dp(20), dp(12))
-                    background = roundedBackground(Color.rgb(38, 38, 38), dp(12))
+                    background = roundedBackground(Color.rgb(232, 240, 254), dp(12))
                     setOnClickListener { retryBrowserPage() }
                 })
             }
@@ -693,16 +684,16 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(12), dp(9), dp(12), dp(10))
-            setBackgroundColor(Color.BLACK)
+            setBackgroundColor(Color.WHITE)
         }
 
         val searchShell = FrameLayout(this).apply {
-            background = roundedBackground(Color.rgb(20, 20, 20), dp(18))
+            background = roundedBackground(Color.rgb(241, 243, 244), dp(18))
         }
         searchField = EditText(this).apply {
             hint = "Search or enter address"
-            setHintTextColor(Color.rgb(160, 160, 160))
-            setTextColor(Color.WHITE)
+            setHintTextColor(Color.rgb(95, 99, 104))
+            setTextColor(Color.rgb(32, 33, 36))
             textSize = 14f
             setSingleLine(true)
             imeOptions = EditorInfo.IME_ACTION_GO
@@ -751,17 +742,17 @@ class MainActivity : AppCompatActivity() {
             marginStart = dp(8)
         })
 
-        windowsButton = textView("1", 16f, Color.WHITE, bold = true).apply {
+        windowsButton = textView("1", 16f, Color.rgb(32, 33, 36), bold = true).apply {
             gravity = Gravity.CENTER
             contentDescription = "Show all windows"
-            background = roundedBackground(Color.rgb(17, 17, 17), dp(15))
+            background = roundedBackground(Color.rgb(241, 243, 244), dp(15))
             setOnClickListener { showWindowsDialog() }
         }
         bar.addView(windowsButton, LinearLayout.LayoutParams(dp(46), dp(54)).apply {
             marginStart = dp(6)
         })
 
-        defaultBrowserButton = textView("⋮", 26f, Color.WHITE, bold = true).apply {
+        defaultBrowserButton = textView("⋮", 26f, Color.rgb(32, 33, 36), bold = true).apply {
             gravity = Gravity.CENTER
             contentDescription = "Browser options"
             visibility = if (isDefaultBrowser()) View.GONE else View.VISIBLE
@@ -798,9 +789,9 @@ class MainActivity : AppCompatActivity() {
             background = if (transparentBackground) {
                 android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
             } else {
-                roundedBackground(Color.rgb(17, 17, 17), dp(15))
+                roundedBackground(Color.rgb(241, 243, 244), dp(15))
             }
-            imageTintList = ColorStateList.valueOf(Color.WHITE)
+            imageTintList = ColorStateList.valueOf(Color.rgb(32, 33, 36))
             setOnClickListener { action() }
         }
     }
@@ -1335,16 +1326,16 @@ class MainActivity : AppCompatActivity() {
                 gravity = Gravity.CENTER_VERTICAL
             }
             selectionBar.addView(textView(
-                "${selectedDownloadIds.size} selected", 18f, Color.WHITE, bold = true
+                "${selectedDownloadIds.size} selected", 18f, Color.rgb(32, 33, 36), bold = true
             ), LinearLayout.LayoutParams(0, dp(42), 1f))
             selectionBar.addView(
-                downloadActionButton("Delete", Color.rgb(92, 34, 34)) {
+                downloadActionButton("Delete", Color.rgb(252, 232, 230)) {
                     confirmDeleteSelectedDownloads()
                 },
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40))
             )
             selectionBar.addView(
-                downloadActionButton("Cancel", Color.rgb(48, 48, 48)) {
+                downloadActionButton("Cancel", Color.rgb(232, 234, 237)) {
                     selectedDownloadIds.clear()
                     renderDownloads()
                 },
@@ -1356,15 +1347,15 @@ class MainActivity : AppCompatActivity() {
             downloadsList.addView(textView(
                 "Tap other download entries to add them to the selection.",
                 12f,
-                Color.rgb(155, 155, 155)
+                Color.rgb(95, 99, 104)
             ).apply { setPadding(0, dp(7), 0, dp(22)) })
         } else {
-            downloadsList.addView(textView("Downloads", 24f, Color.WHITE, bold = true))
+            downloadsList.addView(textView("Downloads", 24f, Color.rgb(32, 33, 36), bold = true))
         }
 
         if (visibleRecords.isEmpty()) {
             downloadsList.addView(textView(
-                "No downloads yet", 14f, Color.rgb(180, 180, 180)
+                "No downloads yet", 14f, Color.rgb(95, 99, 104)
             ).apply { setPadding(0, dp(24), 0, 0) })
             return
         }
@@ -1379,7 +1370,7 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(13), dp(14), dp(12))
             background = roundedBackground(
-                if (isSelected) Color.rgb(38, 38, 38) else Color.rgb(16, 16, 16),
+                if (isSelected) Color.rgb(232, 240, 254) else Color.rgb(16, 16, 16),
                 dp(14)
             )
         }
@@ -1391,7 +1382,7 @@ class MainActivity : AppCompatActivity() {
         titleRow.addView(textView(
             (if (isSelected) "✓  " else "") + record.name,
             14f,
-            Color.WHITE,
+            Color.rgb(32, 33, 36),
             bold = true
         ).apply {
             maxLines = 1
@@ -1410,7 +1401,7 @@ class MainActivity : AppCompatActivity() {
             record.paused -> "PAUSED"
             else -> "${record.percent}%"
         }
-        titleRow.addView(textView(statusText, 10f, Color.rgb(190, 190, 190), bold = true))
+        titleRow.addView(textView(statusText, 10f, Color.rgb(95, 99, 104), bold = true))
         card.addView(titleRow)
 
         val detail = when {
@@ -1421,7 +1412,7 @@ class MainActivity : AppCompatActivity() {
             record.paused -> "Paused · ${formatBytes(record.receivedBytes)} received"
             else -> "${formatSpeed(record.speedBytesPerSecond)} · ${formatBytes(record.receivedBytes)} of ${formatBytes(record.totalBytes)}"
         }
-        card.addView(textView(detail, 12f, Color.rgb(165, 165, 165)).apply {
+        card.addView(textView(detail, 12f, Color.rgb(95, 99, 104)).apply {
             setPadding(0, dp(8), 0, dp(10))
         })
 
@@ -1429,8 +1420,8 @@ class MainActivity : AppCompatActivity() {
             val progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
                 max = 100
                 this.progress = record.percent
-                progressTintList = ColorStateList.valueOf(Color.WHITE)
-                progressBackgroundTintList = ColorStateList.valueOf(Color.rgb(58, 58, 58))
+                progressTintList = ColorStateList.valueOf(Color.rgb(32, 33, 36))
+                progressBackgroundTintList = ColorStateList.valueOf(Color.rgb(218, 220, 224))
             }
             card.addView(progress, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(4)
@@ -1464,11 +1455,11 @@ class MainActivity : AppCompatActivity() {
                 { pauseDownload(record) }
             }
             actions.addView(
-                downloadActionButton(primaryLabel, Color.rgb(48, 48, 48), primaryAction),
+                downloadActionButton(primaryLabel, Color.rgb(232, 234, 237), primaryAction),
                 LinearLayout.LayoutParams(0, dp(42), 1f)
             )
             actions.addView(
-                downloadActionButton("Cancel", Color.rgb(74, 36, 36)) { cancelDownload(record) },
+                downloadActionButton("Cancel", Color.rgb(252, 232, 230)) { cancelDownload(record) },
                 LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(9) }
             )
             card.addView(actions, LinearLayout.LayoutParams(
@@ -1487,7 +1478,7 @@ class MainActivity : AppCompatActivity() {
         label: String,
         backgroundColor: Int,
         action: () -> Unit
-    ): TextView = textView(label, 12f, Color.WHITE, bold = true).apply {
+    ): TextView = textView(label, 12f, Color.rgb(32, 33, 36), bold = true).apply {
         gravity = Gravity.CENTER
         setPadding(dp(12), dp(8), dp(12), dp(8))
         background = roundedBackground(backgroundColor, dp(10))
