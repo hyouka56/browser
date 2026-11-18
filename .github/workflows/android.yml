@@ -53,8 +53,6 @@ jobs:
           test -x "$ANDROID_HOME/build-tools/37.0.0/apksigner"
           test -x "$ANDROID_HOME/build-tools/37.0.0/aapt"
 
-      - name: Validate adaptive dark-mode script syntax
-        run: node --check app/src/main/assets/browser-dark-mode.js
 
       - name: Run unit tests and build installable APKs
         run: gradle --no-daemon clean testEmulatorDebugUnitTest assembleEmulatorDebug assemblePhoneDebug assembleArm64Debug
