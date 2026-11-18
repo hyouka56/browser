@@ -180,10 +180,10 @@ class MainActivity : AppCompatActivity() {
         searchField.setText(initialUrl)
         browserSlot.removeAllViews()
         updateWindowsButton()
-        // Keep every website in its native light color scheme; never inject page recoloring.
+        // Darken app chrome only. Keep each website in its own color scheme; never inject page recoloring.
         instance.setBackgroundColor(Color.WHITE)
         instance.setDarkMode(false)
-        Log.i(TAG, "LIGHT_MODE_ENABLED nativePageColors=true")
+        Log.i(TAG, "DARK_APP_CHROME_ENABLED websiteColorsUntouched=true")
         instance.setPageVisible(true)
         if (BuildConfig.DEBUG && intent.getBooleanExtra(EXTRA_TEST_DOWNLOAD_PAGE, false)) {
             instance.addDocumentStartJavaScript(
@@ -598,11 +598,11 @@ class MainActivity : AppCompatActivity() {
     private fun buildLayout() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(COLOR_APP_BACKGROUND)
         }
         setContentView(root)
 
-        val content = FrameLayout(this).apply { setBackgroundColor(Color.WHITE) }
+        val content = FrameLayout(this).apply { setBackgroundColor(COLOR_APP_BACKGROUND) }
         root.addView(content, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
         ))
@@ -617,19 +617,19 @@ class MainActivity : AppCompatActivity() {
         downloadsList = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(22), dp(18), dp(24))
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(COLOR_APP_BACKGROUND)
         }
         downloadsPanel = ScrollView(this).apply {
             visibility = View.GONE
             isFillViewport = true
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(COLOR_APP_BACKGROUND)
             addView(downloadsList)
         }
         downloadsSwipeRefresh = SwipeRefreshLayout(this).apply {
             isEnabled = !BuildConfig.TV_LITE
             visibility = View.GONE
-            setColorSchemeColors(Color.rgb(26, 115, 232))
-            setProgressBackgroundColorSchemeColor(Color.rgb(218, 220, 224))
+            setColorSchemeColors(COLOR_ACCENT)
+            setProgressBackgroundColorSchemeColor(COLOR_BORDER)
             setOnChildScrollUpCallback { _, _ -> downloadsPanel.canScrollVertically(-1) }
             setOnRefreshListener { refreshDownloads() }
             addView(downloadsPanel, ViewGroup.LayoutParams(
@@ -644,24 +644,24 @@ class MainActivity : AppCompatActivity() {
 
         rendererErrorPanel = FrameLayout(this).apply {
             visibility = View.GONE
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(COLOR_APP_BACKGROUND)
             val message = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
                 setPadding(dp(28), dp(24), dp(28), dp(24))
-                addView(textView("Page stopped unexpectedly", 18f, Color.rgb(32, 33, 36), bold = true))
+                addView(textView("Page stopped unexpectedly", 18f, COLOR_TEXT_PRIMARY, bold = true))
                 addView(textView(
                     "Chromium stopped rendering this page. Reload to continue.",
                     13f,
-                    Color.rgb(95, 99, 104)
+                    COLOR_TEXT_SECONDARY
                 ).apply {
                     gravity = Gravity.CENTER
                     setPadding(0, dp(9), 0, dp(20))
                 })
-                addView(textView("RELOAD PAGE", 12f, Color.rgb(32, 33, 36), bold = true).apply {
+                addView(textView("RELOAD PAGE", 12f, COLOR_TEXT_PRIMARY, bold = true).apply {
                     gravity = Gravity.CENTER
                     setPadding(dp(20), dp(12), dp(20), dp(12))
-                    background = roundedBackground(Color.rgb(232, 240, 254), dp(12))
+                    background = roundedBackground(COLOR_ACCENT_SURFACE, dp(12))
                     setOnClickListener { retryBrowserPage() }
                 })
             }
@@ -684,16 +684,16 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(12), dp(9), dp(12), dp(10))
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(COLOR_APP_BACKGROUND)
         }
 
         val searchShell = FrameLayout(this).apply {
-            background = roundedBackground(Color.rgb(241, 243, 244), dp(18))
+            background = roundedBackground(COLOR_SURFACE, dp(18))
         }
         searchField = EditText(this).apply {
             hint = "Search or enter address"
-            setHintTextColor(Color.rgb(95, 99, 104))
-            setTextColor(Color.rgb(32, 33, 36))
+            setHintTextColor(COLOR_TEXT_SECONDARY)
+            setTextColor(COLOR_TEXT_PRIMARY)
             textSize = 14f
             setSingleLine(true)
             imeOptions = EditorInfo.IME_ACTION_GO
@@ -703,6 +703,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(15), 0, dp(12), 0)
             setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_search, 0, 0, 0)
             compoundDrawablePadding = dp(10)
+            compoundDrawableTintList = ColorStateList.valueOf(COLOR_TEXT_SECONDARY)
             setSelectAllOnFocus(true)
         }
         searchField.setOnEditorActionListener { _, actionId, _ ->
@@ -742,17 +743,17 @@ class MainActivity : AppCompatActivity() {
             marginStart = dp(8)
         })
 
-        windowsButton = textView("1", 16f, Color.rgb(32, 33, 36), bold = true).apply {
+        windowsButton = textView("1", 16f, COLOR_TEXT_PRIMARY, bold = true).apply {
             gravity = Gravity.CENTER
             contentDescription = "Show all windows"
-            background = roundedBackground(Color.rgb(241, 243, 244), dp(15))
+            background = roundedBackground(COLOR_SURFACE, dp(15))
             setOnClickListener { showWindowsDialog() }
         }
         bar.addView(windowsButton, LinearLayout.LayoutParams(dp(46), dp(54)).apply {
             marginStart = dp(6)
         })
 
-        defaultBrowserButton = textView("⋮", 26f, Color.rgb(32, 33, 36), bold = true).apply {
+        defaultBrowserButton = textView("⋮", 26f, COLOR_TEXT_PRIMARY, bold = true).apply {
             gravity = Gravity.CENTER
             contentDescription = "Browser options"
             visibility = if (isDefaultBrowser()) View.GONE else View.VISIBLE
@@ -789,9 +790,9 @@ class MainActivity : AppCompatActivity() {
             background = if (transparentBackground) {
                 android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
             } else {
-                roundedBackground(Color.rgb(241, 243, 244), dp(15))
+                roundedBackground(COLOR_SURFACE, dp(15))
             }
-            imageTintList = ColorStateList.valueOf(Color.rgb(32, 33, 36))
+            imageTintList = ColorStateList.valueOf(COLOR_TEXT_PRIMARY)
             setOnClickListener { action() }
         }
     }
@@ -1326,16 +1327,16 @@ class MainActivity : AppCompatActivity() {
                 gravity = Gravity.CENTER_VERTICAL
             }
             selectionBar.addView(textView(
-                "${selectedDownloadIds.size} selected", 18f, Color.rgb(32, 33, 36), bold = true
+                "${selectedDownloadIds.size} selected", 18f, COLOR_TEXT_PRIMARY, bold = true
             ), LinearLayout.LayoutParams(0, dp(42), 1f))
             selectionBar.addView(
-                downloadActionButton("Delete", Color.rgb(252, 232, 230)) {
+                downloadActionButton("Delete", COLOR_DANGER_SURFACE) {
                     confirmDeleteSelectedDownloads()
                 },
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40))
             )
             selectionBar.addView(
-                downloadActionButton("Cancel", Color.rgb(232, 234, 237)) {
+                downloadActionButton("Cancel", COLOR_BUTTON_SURFACE) {
                     selectedDownloadIds.clear()
                     renderDownloads()
                 },
@@ -1347,15 +1348,15 @@ class MainActivity : AppCompatActivity() {
             downloadsList.addView(textView(
                 "Tap other download entries to add them to the selection.",
                 12f,
-                Color.rgb(95, 99, 104)
+                COLOR_TEXT_SECONDARY
             ).apply { setPadding(0, dp(7), 0, dp(22)) })
         } else {
-            downloadsList.addView(textView("Downloads", 24f, Color.rgb(32, 33, 36), bold = true))
+            downloadsList.addView(textView("Downloads", 24f, COLOR_TEXT_PRIMARY, bold = true))
         }
 
         if (visibleRecords.isEmpty()) {
             downloadsList.addView(textView(
-                "No downloads yet", 14f, Color.rgb(95, 99, 104)
+                "No downloads yet", 14f, COLOR_TEXT_SECONDARY
             ).apply { setPadding(0, dp(24), 0, 0) })
             return
         }
@@ -1370,7 +1371,7 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(13), dp(14), dp(12))
             background = roundedBackground(
-                if (isSelected) Color.rgb(232, 240, 254) else Color.rgb(245, 246, 247),
+                if (isSelected) COLOR_ACCENT_SURFACE else COLOR_CARD,
                 dp(14)
             )
         }
@@ -1382,7 +1383,7 @@ class MainActivity : AppCompatActivity() {
         titleRow.addView(textView(
             (if (isSelected) "✓  " else "") + record.name,
             14f,
-            Color.rgb(32, 33, 36),
+            COLOR_TEXT_PRIMARY,
             bold = true
         ).apply {
             maxLines = 1
@@ -1401,7 +1402,7 @@ class MainActivity : AppCompatActivity() {
             record.paused -> "PAUSED"
             else -> "${record.percent}%"
         }
-        titleRow.addView(textView(statusText, 10f, Color.rgb(95, 99, 104), bold = true))
+        titleRow.addView(textView(statusText, 10f, COLOR_TEXT_SECONDARY, bold = true))
         card.addView(titleRow)
 
         val detail = when {
@@ -1412,7 +1413,7 @@ class MainActivity : AppCompatActivity() {
             record.paused -> "Paused · ${formatBytes(record.receivedBytes)} received"
             else -> "${formatSpeed(record.speedBytesPerSecond)} · ${formatBytes(record.receivedBytes)} of ${formatBytes(record.totalBytes)}"
         }
-        card.addView(textView(detail, 12f, Color.rgb(95, 99, 104)).apply {
+        card.addView(textView(detail, 12f, COLOR_TEXT_SECONDARY).apply {
             setPadding(0, dp(8), 0, dp(10))
         })
 
@@ -1420,8 +1421,8 @@ class MainActivity : AppCompatActivity() {
             val progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
                 max = 100
                 this.progress = record.percent
-                progressTintList = ColorStateList.valueOf(Color.rgb(32, 33, 36))
-                progressBackgroundTintList = ColorStateList.valueOf(Color.rgb(218, 220, 224))
+                progressTintList = ColorStateList.valueOf(COLOR_TEXT_PRIMARY)
+                progressBackgroundTintList = ColorStateList.valueOf(COLOR_BORDER)
             }
             card.addView(progress, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(4)
@@ -1455,11 +1456,11 @@ class MainActivity : AppCompatActivity() {
                 { pauseDownload(record) }
             }
             actions.addView(
-                downloadActionButton(primaryLabel, Color.rgb(232, 234, 237), primaryAction),
+                downloadActionButton(primaryLabel, COLOR_BUTTON_SURFACE, primaryAction),
                 LinearLayout.LayoutParams(0, dp(42), 1f)
             )
             actions.addView(
-                downloadActionButton("Cancel", Color.rgb(252, 232, 230)) { cancelDownload(record) },
+                downloadActionButton("Cancel", COLOR_DANGER_SURFACE) { cancelDownload(record) },
                 LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(9) }
             )
             card.addView(actions, LinearLayout.LayoutParams(
@@ -1478,7 +1479,9 @@ class MainActivity : AppCompatActivity() {
         label: String,
         backgroundColor: Int,
         action: () -> Unit
-    ): TextView = textView(label, 12f, Color.rgb(32, 33, 36), bold = true).apply {
+    ): TextView = textView(
+        label, 12f, if (backgroundColor == COLOR_DANGER_SURFACE) COLOR_DANGER_TEXT else COLOR_TEXT_PRIMARY, bold = true
+    ).apply {
         gravity = Gravity.CENTER
         setPadding(dp(12), dp(8), dp(12), dp(8))
         background = roundedBackground(backgroundColor, dp(10))
@@ -1893,6 +1896,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     private companion object {
+        val COLOR_APP_BACKGROUND = 0xFF121418.toInt()
+        val COLOR_SURFACE = 0xFF1C222B.toInt()
+        val COLOR_CARD = 0xFF202731.toInt()
+        val COLOR_BUTTON_SURFACE = 0xFF303945.toInt()
+        val COLOR_TEXT_PRIMARY = 0xFFF1F4F8.toInt()
+        val COLOR_TEXT_SECONDARY = 0xFFB2BBC7.toInt()
+        val COLOR_BORDER = 0xFF424B59.toInt()
+        val COLOR_ACCENT = 0xFF8AB4F8.toInt()
+        val COLOR_ACCENT_SURFACE = 0xFF263B59.toInt()
+        val COLOR_DANGER_SURFACE = 0xFF4B292C.toInt()
+        val COLOR_DANGER_TEXT = 0xFFFFB4AB.toInt()
         const val PREFERENCES = "browser_preferences"
         const val HOME_URL = "https://www.google.com/"
         const val DOWNLOAD_NOTIFICATION_ID = 4103
