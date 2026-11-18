@@ -1370,7 +1370,7 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(13), dp(14), dp(12))
             background = roundedBackground(
-                if (isSelected) Color.rgb(232, 240, 254) else Color.rgb(16, 16, 16),
+                if (isSelected) Color.rgb(232, 240, 254) else Color.rgb(245, 246, 247),
                 dp(14)
             )
         }
