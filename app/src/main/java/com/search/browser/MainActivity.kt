@@ -191,13 +191,14 @@ class MainActivity : AppCompatActivity() {
         incognito: Boolean = false,
         replaceWindowId: Int? = null,
         existingBrowser: CefriumBrowser? = null,
-        loadInitialUrl: Boolean = true
+        loadInitialUrl: Boolean = true,
+        previousBrowserAlreadyClosed: Boolean = false
     ) {
         val previousWindow = browserWindows.firstOrNull { it.id == activeWindowId }
-        if (previousWindow != null && previousWindow.browser !== existingBrowser) {
+        if (!previousBrowserAlreadyClosed && previousWindow != null && previousWindow.browser !== existingBrowser) {
             exitPageFullscreen()
         }
-        if (previousWindow != null && previousWindow.browser !== existingBrowser &&
+        if (!previousBrowserAlreadyClosed && previousWindow != null && previousWindow.browser !== existingBrowser &&
             !hasActiveDownloadForBrowser(previousWindow.browser)
         ) {
             previousWindow.browser.setFocus(false)
@@ -643,7 +644,12 @@ class MainActivity : AppCompatActivity() {
         rendererErrorPanel.visibility = View.GONE
 
         Log.i(TAG, "CHROMIUM_RECOVERY_STARTED restoreUrl=${if (currentWindow?.incognito == true) "<private>" else restoreUrl}")
-        attachBrowser(restoreUrl, incognito = currentWindow?.incognito == true, replaceWindowId = currentWindow?.id)
+        attachBrowser(
+            restoreUrl,
+            incognito = currentWindow?.incognito == true,
+            replaceWindowId = currentWindow?.id,
+            previousBrowserAlreadyClosed = true
+        )
     }
 
     private fun captureAndVerifyPage(instance: CefriumBrowser, url: String) {

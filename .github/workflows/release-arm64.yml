@@ -86,7 +86,7 @@ jobs:
               raise SystemExit(f"Expected only arm64-v8a, found {abis}")
           print(f"Verified native ABI: {abis}")
           PY
-          "$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$APK" | grep -F "package: name='com.search.browser' versionCode='15' versionName='1.0.15'"
+          "$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$APK" | grep -F "package: name='com.search.browser' versionCode='16' versionName='1.0.15'"
           "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --verbose --print-certs "$APK" | tee release-signature.txt
           cp "$APK" Browser-1.0.15-ARM64-Release-Persistent-Signed.apk
 

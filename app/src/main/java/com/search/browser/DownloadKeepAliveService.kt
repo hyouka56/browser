@@ -136,7 +136,8 @@ class DownloadKeepAliveService : Service() {
             val intent = Intent(context, DownloadKeepAliveService::class.java).apply {
                 putExtra(EXTRA_DOWNLOAD_NAME, name)
             }
-            return ContextCompat.startForegroundService(context, intent) != null
+            ContextCompat.startForegroundService(context, intent)
+            return true
         }
 
         fun stop(context: Context) {
