@@ -14,7 +14,8 @@ object HtmlDocumentSupport {
             ?.substringBefore(';')
             ?.trim()
             ?.lowercase(Locale.ROOT)
-        return extension in htmlExtensions || normalizedMimeType in htmlMimeTypes
+        return extension?.let(htmlExtensions::contains) == true ||
+            normalizedMimeType?.let(htmlMimeTypes::contains) == true
     }
 
     fun safeFileName(displayName: String?): String {

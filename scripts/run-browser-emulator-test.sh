@@ -44,6 +44,19 @@ adb install --no-streaming -r "$APK" | tee "$ARTIFACTS/install.txt"
 adb shell pm clear "$PACKAGE" >/dev/null
 adb shell am force-stop "$PACKAGE"
 
+# Verify Android registers Browser as an Open with target for HTML and XHTML files.
+for html_mime in text/html application/xhtml+xml; do
+  resolver_output="$(adb shell cmd package query-activities --brief \
+    -a android.intent.action.VIEW -t "$html_mime" 2>&1 | tr -d '\r')"
+  printf '%s\n' "$resolver_output" > "$ARTIFACTS/open-with-${html_mime//\//-}.txt"
+  if ! grep -F "$PACKAGE" <<< "$resolver_output" >/dev/null; then
+    echo "Browser is not registered in Android Open with for $html_mime." >&2
+    echo "$resolver_output" >&2
+    exit 1
+  fi
+done
+echo "PASS: Android Open with resolver includes Browser for HTML and XHTML files." | tee "$ARTIFACTS/open-with-results.txt"
+
 wait_for_log() {
   local pattern="$1"
   local expected_count="${2:-1}"
@@ -542,6 +555,11 @@ report = {
         "cefrium_chromium_engine_logged": "CEF_ENGINE version=0.21.0 chromium=156.0.8078.96" in log,
         "page_title_verified": "PAGE_TITLE window=1 title=Example Domain" in log,
         "page_load_completed": "PAGE_LOAD_STATE loading=false" in log,
+        "android_open_with_lists_browser_for_html_and_xhtml": (
+            (folder / "open-with-results.txt").is_file() and
+            "PASS: Android Open with resolver includes Browser for HTML and XHTML files." in
+                (folder / "open-with-results.txt").read_text()
+        ),
         "local_html_file_opened_and_rendered": (
             "LOCAL_HTML_TEST_FIXTURE_CREATED" in local_html_log and
             "LOCAL_HTML_TEST_FILE_IMPORTED" in local_html_log and

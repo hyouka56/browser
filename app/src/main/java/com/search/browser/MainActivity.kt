@@ -148,11 +148,6 @@ class MainActivity : AppCompatActivity() {
     ) {
         updateDefaultBrowserButton()
     }
-    private val htmlDocumentPicker = registerForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        uri?.let { openHtmlDocument(it) }
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -986,20 +981,19 @@ class MainActivity : AppCompatActivity() {
         defaultBrowserButton = textView("⋮", 26f, COLOR_TEXT_PRIMARY, bold = true).apply {
             gravity = Gravity.CENTER
             contentDescription = "Browser options"
-            visibility = View.VISIBLE
+            visibility = if (isDefaultBrowser()) View.GONE else View.VISIBLE
             setOnClickListener { anchor ->
-                PopupMenu(this@MainActivity, anchor).apply {
-                    menu.add("Open HTML file").setOnMenuItemClickListener {
-                        openHtmlFilePicker()
-                        true
-                    }
-                    if (!isDefaultBrowser()) {
-                        menu.add("Set as default browser").setOnMenuItemClickListener {
+                if (isDefaultBrowser()) {
+                    updateDefaultBrowserButton()
+                } else {
+                    PopupMenu(this@MainActivity, anchor).apply {
+                        menu.add("Set as default browser")
+                        setOnMenuItemClickListener {
                             requestDefaultBrowserRole()
                             true
                         }
-                    }
-                }.show()
+                    }.show()
+                }
             }
         }
         bar.addView(defaultBrowserButton, LinearLayout.LayoutParams(dp(40), dp(54)).apply {
@@ -1306,15 +1300,6 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun openHtmlFilePicker() {
-        runCatching {
-            htmlDocumentPicker.launch(arrayOf("text/html", "application/xhtml+xml"))
-        }.onFailure { error ->
-            Log.e(TAG, "Unable to launch the HTML file picker", error)
-            Toast.makeText(this, "Unable to open the file picker", Toast.LENGTH_LONG).show()
-        }
-    }
-
     private fun openHtmlDocument(uri: Uri, suppliedMimeType: String? = null) {
         val file = copyHtmlDocument(uri, suppliedMimeType)
         if (file == null) {
@@ -1422,7 +1407,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateDefaultBrowserButton() {
         if (!::defaultBrowserButton.isInitialized) return
-        defaultBrowserButton.visibility = View.VISIBLE
+        defaultBrowserButton.visibility = if (isDefaultBrowser()) View.GONE else View.VISIBLE
         defaultBrowserButton.contentDescription = "Browser options"
     }
 
