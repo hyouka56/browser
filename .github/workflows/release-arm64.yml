@@ -87,7 +87,11 @@ jobs:
           print(f"Verified native ABI: {abis}")
           PY
           "$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$APK" | grep -F "package: name='com.search.browser' versionCode='16' versionName='1.0.15'"
+          # JDK 25 warns when apksigner's bundled Conscrypt provider loads native code
+          # from the class path. Explicitly grant native access to unnamed modules.
+          export JDK_JAVA_OPTIONS="--enable-native-access=ALL-UNNAMED"
           "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --verbose --print-certs "$APK" | tee release-signature.txt
+          unset JDK_JAVA_OPTIONS
           cp "$APK" Browser-1.0.15-ARM64-Release-Persistent-Signed.apk
 
       - name: Upload persistently signed Release APK

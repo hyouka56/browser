@@ -41,7 +41,12 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    packaging { jniLibs { useLegacyPackaging = true } }
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+            keepDebugSymbols += listOf("**/libcef.so", "**/libdatastore_shared_counter.so")
+        }
+    }
 
     signingConfigs {
         create("release") {
