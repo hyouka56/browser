@@ -109,6 +109,7 @@ class MainActivity : AppCompatActivity() {
     private val selectedDownloadIds = linkedSetOf<Int>()
     private val pendingPublicSaveIds = mutableSetOf<Int>()
     private var adBlockingEnabled = true
+    private var adBlockTestWindowCreated = false
     private var showingDownloads = false
     private var pageFullscreen = false
     private var pendingWebPermission: PendingWebPermission? = null
@@ -433,6 +434,18 @@ class MainActivity : AppCompatActivity() {
                 if (!window.incognito && title.startsWith("AD_BLOCK_TEST_RESULT ")) {
                     val blockedRequests = runCatching { browser.getBlockedCount() }.getOrDefault(-1)
                     Log.i(TAG, "AD_BLOCK_RUNTIME_RESULT window=$windowId title=$title blockedRequests=$blockedRequests")
+                    if (BuildConfig.DEBUG &&
+                        intent.getBooleanExtra(EXTRA_TEST_ADBLOCK_MULTIWINDOW, false) &&
+                        !adBlockTestWindowCreated
+                    ) {
+                        runOnUiThread {
+                            if (!adBlockTestWindowCreated && browserWindows.size == 1) {
+                                adBlockTestWindowCreated = true
+                                createNewWindow(incognito = false)
+                                Log.i(TAG, "AD_BLOCK_TEST_MULTIWINDOW_CREATED windows=${browserWindows.size}")
+                            }
+                        }
+                    }
                 }
             }
 
@@ -2270,6 +2283,7 @@ class MainActivity : AppCompatActivity() {
         const val EXTRA_SHOW_DOWNLOADS = "com.search.browser.SHOW_DOWNLOADS"
         const val EXTRA_TEST_CRASH_RENDERER = "com.search.browser.TEST_CRASH_RENDERER"
         const val EXTRA_TEST_ADBLOCK_PAGE = "com.search.browser.TEST_ADBLOCK_PAGE"
+        const val EXTRA_TEST_ADBLOCK_MULTIWINDOW = "com.search.browser.TEST_ADBLOCK_MULTIWINDOW"
         const val BACKGROUND_DOWNLOAD_TEST_FILE = "download-background-test.txt"
         const val BACKGROUND_DOWNLOAD_TEST_DELAY_MS = 8_000L
         const val TAG = "Browser"

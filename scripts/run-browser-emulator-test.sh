@@ -126,6 +126,7 @@ run_adblock_phase() {
   local phase="$1"
   local expected_enabled="$2"
   local expected_blocked="$3"
+  local create_second_window="$4:-false"
 
   adb logcat -d -v threadtime > "$ARTIFACTS/adblock-$phase-previous-logcat.txt" 2>&1 || true
   adb logcat -c
@@ -133,6 +134,7 @@ run_adblock_phase() {
   adb shell am start -W -n "$ACTIVITY" \
     --es com.search.browser.TEST_URL "https://example.com/" \
     --ez com.search.browser.TEST_ADBLOCK_PAGE true \
+    --ez com.search.browser.TEST_ADBLOCK_MULTIWINDOW "$create_second_window" \
     2>&1 | tee "$ARTIFACTS/adblock-$phase-launch.txt"
 
   wait_for_log "CEF_ENGINE version=0.21.0 chromium=156.0.8078.96" 1 90
@@ -179,14 +181,13 @@ run_adblock_phase() {
     "$phase" "$expected_enabled" "$rule_count" "$blocked_count" | tee -a "$ARTIFACTS/adblock-results.txt"
 }
 
-# Verify the real EasyList host rule blocks a known ad request while a normal
-# same-origin request on the same page continues to work.
-run_adblock_phase "enabled-default" "true" "yes"
-
-# Open a second live browser window and prove that the shield affects both.
-tap_accessibility_node desc "1 windows"
-tap_accessibility_node text "New window"
+# The actual EasyList host rule must block the ad endpoint without blocking
+# a normal same-origin request. The test-only extra opens a second window.
+run_adblock_phase "enabled-default" "true" "yes" "true"
+wait_for_log "AD_BLOCK_TEST_MULTIWINDOW_CREATED windows=2" 1 30
 wait_for_log "AD_BLOCK_CONFIG enabled=true tvLite=false" 2 90
+
+# Use the actual shield control, not a synthetic state change.
 tap_accessibility_node desc "Ad blocker on"
 wait_for_log "AD_BLOCK_TOGGLED enabled=false windows=2" 1 30
 WINDOW_TOGGLE_COUNT="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "AD_BLOCK_WINDOW_TOGGLED" | grep -F "enabled=false" | wc -l | tr -d ' ')"
@@ -196,17 +197,18 @@ if [[ "$WINDOW_TOGGLE_COUNT" != "2" ]]; then
   exit 1
 fi
 echo "PASS: shield toggle updated both open browser windows." | tee -a "$ARTIFACTS/adblock-results.txt"
+sleep 2
 
-# Verify the disabled preference survives a process restart and no filter rules
-# are applied to the test browser while the list itself remains loaded.
+# Reboot the app process to prove the disabled preference is persisted.
 run_adblock_phase "disabled-persisted" "false" "no"
 
-# Turn blocking back on, verify it is applied, then leave the app enabled.
+# Re-enable it through the actual shield and verify the enabled setting survives restart.
 tap_accessibility_node desc "Ad blocker off"
 wait_for_log "AD_BLOCK_TOGGLED enabled=true windows=1" 1 30
+sleep 2
 run_adblock_phase "enabled-restored" "true" "yes"
 
-# Preserve the original renderer-recovery suite as a separate, normal launch.
+# Continue with the original renderer-recovery suite using a normal launch.
 adb logcat -d -v threadtime > "$ARTIFACTS/adblock-enabled-restored-final-logcat.txt" 2>&1
 adb logcat -c
 adb shell am force-stop "$PACKAGE"
