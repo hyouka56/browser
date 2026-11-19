@@ -20,6 +20,7 @@ import android.os.Handler
 import android.os.Looper
 import android.content.pm.PackageManager
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
@@ -60,6 +61,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.util.Locale
+import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
 
@@ -146,6 +148,11 @@ class MainActivity : AppCompatActivity() {
     ) {
         updateDefaultBrowserButton()
     }
+    private val htmlDocumentPicker = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { openHtmlDocument(it) }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -172,8 +179,27 @@ class MainActivity : AppCompatActivity() {
         } else {
             null
         }
-        val incomingUrl = intent?.dataString?.takeIf(::isSupportedWebUrl)
-        val startUrl = testUrl ?: incomingUrl ?: lastSuccessfulUrl
+        val incomingHtmlUri = intent.data?.takeIf { uri ->
+            intent.action == Intent.ACTION_VIEW && isLocalHtmlDocument(uri, intent.type)
+        }
+        val incomingHtmlFile = incomingHtmlUri?.let { copyHtmlDocument(it, intent.type) }
+        val testHtmlFile = if (BuildConfig.DEBUG &&
+            intent.getBooleanExtra(EXTRA_TEST_OPEN_HTML_FILE, false)
+        ) {
+            copyHtmlDocument(Uri.fromFile(createHtmlFileTestFixture()))?.also {
+                Log.i(TAG, "LOCAL_HTML_TEST_FILE_IMPORTED name=${it.name}")
+            }
+        } else {
+            null
+        }
+        val incomingUrl = intent.dataString?.takeIf(::isSupportedWebUrl)
+        val startUrl = testUrl ?: incomingUrl
+            ?: incomingHtmlFile?.let { Uri.fromFile(it).toString() }
+            ?: testHtmlFile?.let { Uri.fromFile(it).toString() }
+            ?: lastSuccessfulUrl
+        if (incomingHtmlUri != null && incomingHtmlFile == null) {
+            Toast.makeText(this, "Unable to open this HTML file", Toast.LENGTH_LONG).show()
+        }
         attachBrowser(startUrl, savedInstanceState?.getBundle(KEY_BROWSER_STATE))
         if (intent.getBooleanExtra(EXTRA_SHOW_DOWNLOADS, false)) showDownloadsPanel()
 
@@ -960,19 +986,20 @@ class MainActivity : AppCompatActivity() {
         defaultBrowserButton = textView("⋮", 26f, COLOR_TEXT_PRIMARY, bold = true).apply {
             gravity = Gravity.CENTER
             contentDescription = "Browser options"
-            visibility = if (isDefaultBrowser()) View.GONE else View.VISIBLE
+            visibility = View.VISIBLE
             setOnClickListener { anchor ->
-                if (isDefaultBrowser()) {
-                    updateDefaultBrowserButton()
-                } else {
-                    PopupMenu(this@MainActivity, anchor).apply {
-                        menu.add("Set as default browser")
-                        setOnMenuItemClickListener {
+                PopupMenu(this@MainActivity, anchor).apply {
+                    menu.add("Open HTML file").setOnMenuItemClickListener {
+                        openHtmlFilePicker()
+                        true
+                    }
+                    if (!isDefaultBrowser()) {
+                        menu.add("Set as default browser").setOnMenuItemClickListener {
                             requestDefaultBrowserRole()
                             true
                         }
-                    }.show()
-                }
+                    }
+                }.show()
             }
         }
         bar.addView(defaultBrowserButton, LinearLayout.LayoutParams(dp(40), dp(54)).apply {
@@ -1279,6 +1306,108 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private fun openHtmlFilePicker() {
+        runCatching {
+            htmlDocumentPicker.launch(arrayOf("text/html", "application/xhtml+xml"))
+        }.onFailure { error ->
+            Log.e(TAG, "Unable to launch the HTML file picker", error)
+            Toast.makeText(this, "Unable to open the file picker", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun openHtmlDocument(uri: Uri, suppliedMimeType: String? = null) {
+        val file = copyHtmlDocument(uri, suppliedMimeType)
+        if (file == null) {
+            Toast.makeText(this, "Choose a valid HTML file", Toast.LENGTH_LONG).show()
+            return
+        }
+        val fileUrl = Uri.fromFile(file).toString()
+        showBrowser()
+        rendererRecoveryAttempts = 0
+        rendererRecoveryPending = false
+        lastRequestedUrl = fileUrl
+        rendererErrorPanel.visibility = View.GONE
+        browser.loadUrl(fileUrl)
+        browserWindows.firstOrNull { it.id == activeWindowId }?.url = fileUrl
+        searchField.setText(file.name)
+        searchField.clearFocus()
+        (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
+            ?.hideSoftInputFromWindow(searchField.windowToken, 0)
+        Log.i(TAG, "LOCAL_HTML_FILE_OPENED name=${file.name}")
+    }
+
+    private fun isLocalHtmlDocument(uri: Uri, suppliedMimeType: String? = null): Boolean {
+        val scheme = uri.scheme?.lowercase(Locale.ROOT)
+        if (scheme != "content" && scheme != "file") return false
+        val displayName = getHtmlDocumentDisplayName(uri)
+        val providerMimeType = runCatching { contentResolver.getType(uri) }.getOrNull()
+        return HtmlDocumentSupport.isHtmlDocument(displayName, providerMimeType) ||
+            HtmlDocumentSupport.isHtmlDocument(displayName, suppliedMimeType)
+    }
+
+    private fun getHtmlDocumentDisplayName(uri: Uri): String {
+        val providerName = runCatching {
+            contentResolver.query(
+                uri,
+                arrayOf(OpenableColumns.DISPLAY_NAME),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) else null
+            }
+        }.getOrNull()
+        return providerName?.takeIf { it.isNotBlank() }
+            ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+            ?: "page.html"
+    }
+
+    private fun copyHtmlDocument(uri: Uri, suppliedMimeType: String? = null): File? {
+        val displayName = getHtmlDocumentDisplayName(uri)
+        val providerMimeType = runCatching { contentResolver.getType(uri) }.getOrNull()
+        val isHtml = HtmlDocumentSupport.isHtmlDocument(displayName, providerMimeType) ||
+            HtmlDocumentSupport.isHtmlDocument(displayName, suppliedMimeType)
+        if (!isHtml) {
+            Log.w(TAG, "Rejected non-HTML document name=$displayName mimeType=$providerMimeType")
+            return null
+        }
+        val directory = File(cacheDir, "local-html")
+        val destination = File(
+            directory,
+            "${UUID.randomUUID()}-${HtmlDocumentSupport.safeFileName(displayName)}"
+        )
+        return runCatching {
+            if (!directory.isDirectory && !directory.mkdirs()) {
+                error("Unable to create local HTML cache")
+            }
+            val input = contentResolver.openInputStream(uri)
+                ?: error("Unable to read the selected HTML file")
+            input.use { source ->
+                destination.outputStream().buffered().use { output ->
+                    source.copyTo(output)
+                }
+            }
+            destination
+        }.onFailure { error ->
+            destination.delete()
+            Log.e(TAG, "Unable to import HTML file name=$displayName", error)
+        }.getOrNull()
+    }
+
+    private fun createHtmlFileTestFixture(): File {
+        val directory = File(cacheDir, "html-test-fixtures")
+        if (!directory.isDirectory && !directory.mkdirs()) {
+            error("Unable to create the HTML test fixture directory")
+        }
+        return File(directory, "local-open-test.html").apply {
+            writeText(
+                "<!doctype html><html><head><meta charset=\"utf-8\"><title>Local HTML Test</title></head>" +
+                    "<body><main>Local HTML file rendered successfully</main></body></html>"
+            )
+            Log.i(TAG, "LOCAL_HTML_TEST_FIXTURE_CREATED name=$name")
+        }
+    }
+
     private fun isSupportedWebUrl(value: String?): Boolean {
         val scheme = value?.let { Uri.parse(it).scheme }?.lowercase(Locale.ROOT)
         return scheme == "http" || scheme == "https"
@@ -1293,7 +1422,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateDefaultBrowserButton() {
         if (!::defaultBrowserButton.isInitialized) return
-        defaultBrowserButton.visibility = if (isDefaultBrowser()) View.GONE else View.VISIBLE
+        defaultBrowserButton.visibility = View.VISIBLE
+        defaultBrowserButton.contentDescription = "Browser options"
     }
 
     private fun requestDefaultBrowserRole() {
@@ -1330,6 +1460,13 @@ class MainActivity : AppCompatActivity() {
         }
         if (intent.getBooleanExtra(EXTRA_SHOW_DOWNLOADS, false)) {
             showDownloadsPanel()
+            return
+        }
+        val incomingDocument = intent.data?.takeIf { uri ->
+            intent.action == Intent.ACTION_VIEW && isLocalHtmlDocument(uri, intent.type)
+        }
+        if (incomingDocument != null) {
+            openHtmlDocument(incomingDocument, intent.type)
             return
         }
         val url = intent.dataString?.takeIf(::isSupportedWebUrl) ?: return
@@ -2284,6 +2421,7 @@ class MainActivity : AppCompatActivity() {
         const val EXTRA_TEST_CRASH_RENDERER = "com.search.browser.TEST_CRASH_RENDERER"
         const val EXTRA_TEST_ADBLOCK_PAGE = "com.search.browser.TEST_ADBLOCK_PAGE"
         const val EXTRA_TEST_ADBLOCK_MULTIWINDOW = "com.search.browser.TEST_ADBLOCK_MULTIWINDOW"
+        const val EXTRA_TEST_OPEN_HTML_FILE = "com.search.browser.TEST_OPEN_HTML_FILE"
         const val BACKGROUND_DOWNLOAD_TEST_FILE = "download-background-test.txt"
         const val BACKGROUND_DOWNLOAD_TEST_DELAY_MS = 8_000L
         const val TAG = "Browser"

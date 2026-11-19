@@ -208,6 +208,23 @@ wait_for_log "AD_BLOCK_TOGGLED enabled=true windows=1" 1 30
 sleep 2
 run_adblock_phase "enabled-restored" "true" "yes"
 
+# Verify the browser can load a local HTML file through Chromium's file:// scheme.
+adb logcat -c
+adb shell am force-stop "$PACKAGE"
+adb shell am start -W -n "$ACTIVITY" \
+  --ez com.search.browser.TEST_OPEN_HTML_FILE true \
+  2>&1 | tee "$ARTIFACTS/local-html-open-launch.txt"
+wait_for_log "LOCAL_HTML_TEST_FIXTURE_CREATED" 1 30
+wait_for_log "LOCAL_HTML_TEST_FILE_IMPORTED" 1 30
+wait_for_log "PAGE_TITLE window=1 title=Local HTML Test" 1 60
+wait_for_log "PAGE_LOAD_STATE loading=false" 1 60
+adb logcat -d -v threadtime > "$ARTIFACTS/local-html-open-logcat.txt" 2>&1
+if ! grep -F "PAGE_TITLE window=1 title=Local HTML Test" "$ARTIFACTS/local-html-open-logcat.txt" >/dev/null; then
+  echo "Local HTML file did not render successfully." >&2
+  exit 1
+fi
+printf 'PASS: local HTML file opened and rendered through Chromium file://.\n' | tee "$ARTIFACTS/local-html-results.txt"
+
 # Continue with the original renderer-recovery suite using a normal launch.
 adb logcat -d -v threadtime > "$ARTIFACTS/adblock-enabled-restored-final-logcat.txt" 2>&1
 adb logcat -c
@@ -481,6 +498,8 @@ ratio_before, dark_ratio_before, light_ratio_before = visible_content_ratio(befo
 ratio_after, dark_ratio_after, light_ratio_after = visible_content_ratio(after) if after.is_file() else (0.0, 0.0, 0.0)
 adblock_results_path = folder / "adblock-results.txt"
 adblock_result_lines = adblock_results_path.read_text().splitlines() if adblock_results_path.is_file() else []
+local_html_log_path = folder / "local-html-open-logcat.txt"
+local_html_log = local_html_log_path.read_text(errors="replace") if local_html_log_path.is_file() else ""
 
 def phase_result(name, enabled):
     return next(
@@ -523,6 +542,12 @@ report = {
         "cefrium_chromium_engine_logged": "CEF_ENGINE version=0.21.0 chromium=156.0.8078.96" in log,
         "page_title_verified": "PAGE_TITLE window=1 title=Example Domain" in log,
         "page_load_completed": "PAGE_LOAD_STATE loading=false" in log,
+        "local_html_file_opened_and_rendered": (
+            "LOCAL_HTML_TEST_FIXTURE_CREATED" in local_html_log and
+            "LOCAL_HTML_TEST_FILE_IMPORTED" in local_html_log and
+            "PAGE_TITLE window=1 title=Local HTML Test" in local_html_log and
+            "PAGE_LOAD_STATE loading=false" in local_html_log
+        ),
         "dark_app_chrome_enabled_for_both_renderers": log.count("DARK_APP_CHROME_ENABLED websiteColorsUntouched=true") >= 2,
         "website_native_colors_not_forced_dark": light_ratio_before >= 0.55 and light_ratio_after >= 0.55,
         "surface_bitmap_captured_before_crash": log.count("PAGE_BITMAP_CAPTURED url=https://example.com/") >= 1,
