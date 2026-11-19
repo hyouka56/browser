@@ -44,11 +44,6 @@ adb install --no-streaming -r "$APK" | tee "$ARTIFACTS/install.txt"
 adb shell pm clear "$PACKAGE" >/dev/null
 adb shell am force-stop "$PACKAGE"
 
-adb shell am start -W -n "$ACTIVITY" \
-  --es com.search.browser.TEST_URL "https://example.com/" \
-  --ez com.search.browser.TEST_CRASH_RENDERER true \
-  2>&1 | tee "$ARTIFACTS/launch.txt"
-
 wait_for_log() {
   local pattern="$1"
   local expected_count="${2:-1}"
@@ -70,6 +65,155 @@ wait_for_log() {
   echo "Timed out waiting for '$pattern' (expected count: $expected_count)." >&2
   return 1
 }
+
+wait_for_app_log() {
+  local pattern="$1"
+  local expected_count="$2"
+  local timeout_seconds="$3"
+  local elapsed=0
+  while (( elapsed < timeout_seconds )); do
+    local count
+    count="$(adb logcat -d -s BrowserApp:V 2>/dev/null | grep -F -c "$pattern" || true)"
+    if (( count >= expected_count )); then
+      return 0
+    fi
+    if [[ -z "$(adb shell pidof "$PACKAGE" | tr -d '\r')" ]]; then
+      echo "Browser process exited while waiting for app log '$pattern'." >&2
+      return 1
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  echo "Timed out waiting for BrowserApp log '$pattern'." >&2
+  adb logcat -d -s BrowserApp:V >&2 || true
+  return 1
+}
+
+tap_accessibility_node() {
+  local mode="$1"
+  local selector="$2"
+  local hierarchy="$ARTIFACTS/ui-hierarchy-$RANDOM.xml"
+  adb shell uiautomator dump /sdcard/browser-window.xml >/dev/null 2>&1
+  adb exec-out cat /sdcard/browser-window.xml > "$hierarchy"
+  local coordinates
+  coordinates="$(python3 - "$hierarchy" "$mode" "$selector" <<'PY'
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+path, mode, selector = sys.argv[1:]
+root = ET.parse(path).getroot()
+for node in root.iter("node"):
+    value = node.attrib.get("content-desc" if mode == "desc" else "text", "")
+    matches = value.startswith(selector) if mode == "desc" else value == selector
+    if not matches or node.attrib.get("clickable") != "true":
+        continue
+    match = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.attrib.get("bounds", ""))
+    if not match:
+        continue
+    x1, y1, x2, y2 = map(int, match.groups())
+    print((x1 + x2) // 2, (y1 + y2) // 2)
+    raise SystemExit(0)
+raise SystemExit(f"No clickable accessibility node matched {mode}={selector!r}")
+PY
+)"
+  local x y
+  read -r x y <<< "$coordinates"
+  adb shell input tap "$x" "$y"
+}
+
+run_adblock_phase() {
+  local phase="$1"
+  local expected_enabled="$2"
+  local expected_blocked="$3"
+
+  adb logcat -d -v threadtime > "$ARTIFACTS/adblock-$phase-previous-logcat.txt" 2>&1 || true
+  adb logcat -c
+  adb shell am force-stop "$PACKAGE"
+  adb shell am start -W -n "$ACTIVITY" \
+    --es com.search.browser.TEST_URL "https://example.com/" \
+    --ez com.search.browser.TEST_ADBLOCK_PAGE true \
+    2>&1 | tee "$ARTIFACTS/adblock-$phase-launch.txt"
+
+  wait_for_log "CEF_ENGINE version=0.21.0 chromium=156.0.8078.96" 1 90
+  wait_for_log "PAGE_TITLE window=1 title=Example Domain" 1 120
+  wait_for_log "AD_BLOCK_CONFIG enabled=$expected_enabled tvLite=false" 1 60
+  wait_for_app_log "EasyList loaded:" 1 180
+  wait_for_app_log "YouTube ad rules loaded" 1 60
+
+  local rule_count
+  rule_count="$(adb logcat -d -s BrowserApp:V 2>/dev/null | sed -nE 's/.*EasyList loaded: ([0-9]+) rules.*/\1/p' | tail -n1)"
+  if [[ ! "$rule_count" =~ ^[1-9][0-9]*$ ]]; then
+    echo "EasyList did not report a positive rule count: '$rule_count'." >&2
+    adb logcat -d -s BrowserApp:V >&2 || true
+    exit 1
+  fi
+
+  wait_for_log "AD_BLOCK_RUNTIME_RESULT" 1 90
+  local result_line blocked_count
+  result_line="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "AD_BLOCK_RUNTIME_RESULT" | tail -n1)"
+  if ! grep -F "allowed=true" <<< "$result_line" >/dev/null; then
+    echo "The allowed same-origin request failed in ad-block phase '$phase': $result_line" >&2
+    exit 1
+  fi
+  blocked_count="$(sed -nE 's/.*blockedRequests=([-0-9]+).*/\1/p' <<< "$result_line")"
+  if [[ ! "$blocked_count" =~ ^[0-9]+$ ]]; then
+    echo "Could not read Cefrium blocked-request count in phase '$phase': $result_line" >&2
+    exit 1
+  fi
+
+  if [[ "$expected_blocked" == "yes" ]]; then
+    if ! grep -F "adFailed=true" <<< "$result_line" >/dev/null || (( blocked_count < 1 )); then
+      echo "Ad request was not blocked with EasyList enabled in phase '$phase': $result_line" >&2
+      exit 1
+    fi
+  else
+    if (( blocked_count != 0 )); then
+      echo "Requests were still blocked while the ad blocker was disabled in phase '$phase': $result_line" >&2
+      exit 1
+    fi
+  fi
+
+  adb logcat -d -v threadtime > "$ARTIFACTS/adblock-$phase-logcat.txt" 2>&1
+  printf 'PASS: adblock phase=%s enabled=%s EasyListRules=%s blockedRequests=%s allowedSameOrigin=true\n' \
+    "$phase" "$expected_enabled" "$rule_count" "$blocked_count" | tee -a "$ARTIFACTS/adblock-results.txt"
+}
+
+# Verify the real EasyList host rule blocks a known ad request while a normal
+# same-origin request on the same page continues to work.
+run_adblock_phase "enabled-default" "true" "yes"
+
+# Open a second live browser window and prove that the shield affects both.
+tap_accessibility_node desc "Show all windows"
+tap_accessibility_node text "New window"
+wait_for_log "AD_BLOCK_CONFIG enabled=true tvLite=false" 2 90
+tap_accessibility_node desc "Ad blocker on"
+wait_for_log "AD_BLOCK_TOGGLED enabled=false windows=2" 1 30
+WINDOW_TOGGLE_COUNT="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "AD_BLOCK_WINDOW_TOGGLED" | grep -F "enabled=false" | wc -l | tr -d ' ')"
+if [[ "$WINDOW_TOGGLE_COUNT" != "2" ]]; then
+  echo "Expected the shield to update both open windows; found $WINDOW_TOGGLE_COUNT successful updates." >&2
+  adb logcat -d -s Browser:V >&2 || true
+  exit 1
+fi
+echo "PASS: shield toggle updated both open browser windows." | tee -a "$ARTIFACTS/adblock-results.txt"
+
+# Verify the disabled preference survives a process restart and no filter rules
+# are applied to the test browser while the list itself remains loaded.
+run_adblock_phase "disabled-persisted" "false" "no"
+
+# Turn blocking back on, verify it is applied, then leave the app enabled.
+tap_accessibility_node desc "Ad blocker off"
+wait_for_log "AD_BLOCK_TOGGLED enabled=true windows=1" 1 30
+run_adblock_phase "enabled-restored" "true" "yes"
+
+# Preserve the original renderer-recovery suite as a separate, normal launch.
+adb logcat -d -v threadtime > "$ARTIFACTS/adblock-enabled-restored-final-logcat.txt" 2>&1
+adb logcat -c
+adb shell am force-stop "$PACKAGE"
+adb shell am start -W -n "$ACTIVITY" \
+  --es com.search.browser.TEST_URL "https://example.com/" \
+  --ez com.search.browser.TEST_CRASH_RENDERER true \
+  2>&1 | tee "$ARTIFACTS/launch.txt"
 
 wait_for_log "CEF_ENGINE version=0.21.0 chromium=156.0.8078.96" 1 90
 wait_for_log "PAGE_TITLE window=1 title=Example Domain" 1 120
@@ -333,6 +477,28 @@ before = folder / "page-before-renderer-restart.png"
 after = folder / "page-after-renderer-recovery.png"
 ratio_before, dark_ratio_before, light_ratio_before = visible_content_ratio(before) if before.is_file() else (0.0, 0.0, 0.0)
 ratio_after, dark_ratio_after, light_ratio_after = visible_content_ratio(after) if after.is_file() else (0.0, 0.0, 0.0)
+adblock_results_path = folder / "adblock-results.txt"
+adblock_result_lines = adblock_results_path.read_text().splitlines() if adblock_results_path.is_file() else []
+
+def phase_result(name, enabled):
+    return next(
+        (line for line in adblock_result_lines if f"phase={name} " in line and f"enabled={enabled}" in line),
+        ""
+    )
+
+def field_int(line, field):
+    marker = field + "="
+    if marker not in line:
+        return -1
+    try:
+        return int(line.split(marker, 1)[1].split()[0])
+    except (ValueError, IndexError):
+        return -1
+
+enabled_default = phase_result("enabled-default", "true")
+disabled_persisted = phase_result("disabled-persisted", "false")
+enabled_restored = phase_result("enabled-restored", "true")
+
 report = {
     "application_id": "com.search.browser",
     "engine": "Chromium via Cefrium",
@@ -377,6 +543,29 @@ report = {
         "background_download_finished_after_task_removal": "DOWNLOAD_FILE_SAVED name=download-background-test.txt" in log and (folder / "background-download-after-task-removal.txt").is_file(),
         "foreground_service_stopped_after_download": "DOWNLOAD_KEEP_ALIVE_SERVICE_STOPPED" in log,
         "browser_closed_after_download": "BROWSER_CLOSED_AFTER_DOWNLOAD" in log,
+        "easylist_loaded_with_positive_rule_count": (
+            field_int(enabled_default, "EasyListRules") > 0 and
+            field_int(disabled_persisted, "EasyListRules") > 0 and
+            field_int(enabled_restored, "EasyListRules") > 0
+        ),
+        "known_ad_request_blocked_when_enabled": (
+            field_int(enabled_default, "blockedRequests") > 0 and
+            "allowedSameOrigin=true" in enabled_default
+        ),
+        "normal_same_origin_request_remains_allowed": (
+            "allowedSameOrigin=true" in enabled_default and
+            "allowedSameOrigin=true" in disabled_persisted and
+            "allowedSameOrigin=true" in enabled_restored
+        ),
+        "disabled_ad_block_state_persists_and_does_not_block": (
+            field_int(disabled_persisted, "blockedRequests") == 0
+        ),
+        "ad_blocking_restored_after_reenable": (
+            field_int(enabled_restored, "blockedRequests") > 0
+        ),
+        "shield_toggle_updates_every_open_window": (
+            "PASS: shield toggle updated both open browser windows." in adblock_result_lines
+        ),
     },
 }
 report["result"] = "PASS" if all(report["checks"].values()) else "FAIL"

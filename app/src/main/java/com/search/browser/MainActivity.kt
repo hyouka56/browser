@@ -303,6 +303,58 @@ class MainActivity : AppCompatActivity() {
                 setOf("*")
             )
         }
+        if (BuildConfig.DEBUG && intent.getBooleanExtra(EXTRA_TEST_ADBLOCK_PAGE, false)) {
+            instance.addDocumentStartJavaScript(
+                """
+                (() => {
+                    if (window.__browserAdBlockProbeInstalled) return;
+                    window.__browserAdBlockProbeInstalled = true;
+                    const runProbe = () => {
+                        const state = {
+                            allowed: false,
+                            allowedDone: false,
+                            adFailed: false,
+                            adDone: false,
+                            reported: false
+                        };
+                        const report = () => {
+                            if (state.reported || !state.allowedDone || !state.adDone) return;
+                            state.reported = true;
+                            document.title = "AD_BLOCK_TEST_RESULT allowed=" + state.allowed +
+                                " adFailed=" + state.adFailed;
+                        };
+                        fetch(location.origin + "/?browser-adblock-allowed-probe=" + Date.now(), {
+                            cache: "no-store"
+                        }).then(response => {
+                            state.allowed = response.ok;
+                            state.allowedDone = true;
+                            report();
+                        }).catch(() => {
+                            state.allowedDone = true;
+                            report();
+                        });
+                        fetch("https://g.doubleclick.net/gampad/ads?browser-adblock-probe=" + Date.now(), {
+                            mode: "no-cors",
+                            cache: "no-store"
+                        }).then(() => {
+                            state.adFailed = false;
+                            state.adDone = true;
+                            report();
+                        }).catch(() => {
+                            state.adFailed = true;
+                            state.adDone = true;
+                            report();
+                        });
+                    };
+                    // The emulator waits for the first-run filter-list load before judging this request.
+                    setTimeout(runProbe, 30000);
+                })();
+                """.trimIndent(),
+                setOf("*")
+            )
+            Log.i(TAG, "AD_BLOCK_RUNTIME_PROBE_INSTALLED")
+        }
+
         if (!BuildConfig.TV_LITE) instance.setAdBlockEnabled(adBlockingEnabled)
         Log.i(TAG, "AD_BLOCK_CONFIG enabled=$adBlockingEnabled tvLite=${BuildConfig.TV_LITE}")
         browserSlot.addView(
@@ -378,6 +430,10 @@ class MainActivity : AppCompatActivity() {
                 window.title = title.ifBlank { "New tab" }
                 runOnUiThread { if (activeWindowId == windowId) updateWindowsButton() }
                 Log.i(TAG, "PAGE_TITLE window=$windowId title=${if (window.incognito) "<private>" else title}")
+                if (!window.incognito && title.startsWith("AD_BLOCK_TEST_RESULT ")) {
+                    val blockedRequests = runCatching { browser.getBlockedCount() }.getOrDefault(-1)
+                    Log.i(TAG, "AD_BLOCK_RUNTIME_RESULT window=$windowId title=$title blockedRequests=$blockedRequests")
+                }
             }
 
             override fun onCreateWindow(
@@ -1276,7 +1332,13 @@ class MainActivity : AppCompatActivity() {
     private fun toggleAdBlocking() {
         adBlockingEnabled = !adBlockingEnabled
         preferences.edit().putBoolean(KEY_AD_BLOCK, adBlockingEnabled).apply()
-        browser.setAdBlockEnabled(adBlockingEnabled)
+        browserWindows.toList().forEach { target ->
+            runCatching {
+                target.browser.setAdBlockEnabled(adBlockingEnabled)
+                Log.i(TAG, "AD_BLOCK_WINDOW_TOGGLED window=${target.id} enabled=$adBlockingEnabled")
+            }.onFailure { Log.w(TAG, "Unable to update ad blocking for window=${target.id}", it) }
+        }
+        Log.i(TAG, "AD_BLOCK_TOGGLED enabled=$adBlockingEnabled windows=${browserWindows.size}")
         updateShieldButton()
     }
 
@@ -2207,6 +2269,7 @@ class MainActivity : AppCompatActivity() {
         const val EXTRA_TEST_DOWNLOAD_PAGE = "com.search.browser.TEST_DOWNLOAD_PAGE"
         const val EXTRA_SHOW_DOWNLOADS = "com.search.browser.SHOW_DOWNLOADS"
         const val EXTRA_TEST_CRASH_RENDERER = "com.search.browser.TEST_CRASH_RENDERER"
+        const val EXTRA_TEST_ADBLOCK_PAGE = "com.search.browser.TEST_ADBLOCK_PAGE"
         const val BACKGROUND_DOWNLOAD_TEST_FILE = "download-background-test.txt"
         const val BACKGROUND_DOWNLOAD_TEST_DELAY_MS = 8_000L
         const val TAG = "Browser"
