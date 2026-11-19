@@ -36,6 +36,7 @@ import android.widget.PopupMenu
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.core.app.NotificationCompat
@@ -45,10 +46,15 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.cefrium.CefriumBrowser
 import com.cefrium.CefriumChromeClient
 import com.cefrium.CefriumDownloadClient
 import com.cefrium.CefriumNavigationClient
+import com.cefrium.CefriumPermission
+import com.cefrium.CefriumPermissionRequest
 import com.cefrium.CefriumRendererTerminationStatus
 import org.json.JSONArray
 import org.json.JSONObject
@@ -56,6 +62,11 @@ import java.io.File
 import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
+
+    private data class PendingWebPermission(
+        val request: CefriumPermissionRequest,
+        val runtimePermissions: List<String>
+    )
 
     private data class BrowserWindow(
         val id: Int,
@@ -66,6 +77,8 @@ class MainActivity : AppCompatActivity() {
     )
 
     private lateinit var browser: CefriumBrowser
+    private lateinit var rootLayout: LinearLayout
+    private lateinit var bottomBar: View
     private lateinit var browserSlot: FrameLayout
     private lateinit var downloadsPanel: ScrollView
     private lateinit var downloadsSwipeRefresh: SwipeRefreshLayout
@@ -97,6 +110,9 @@ class MainActivity : AppCompatActivity() {
     private val pendingPublicSaveIds = mutableSetOf<Int>()
     private var adBlockingEnabled = true
     private var showingDownloads = false
+    private var pageFullscreen = false
+    private var pendingWebPermission: PendingWebPermission? = null
+    private var permissionPrompt: AlertDialog? = null
     private var notificationPermissionRequested = false
     private var downloadKeepAliveStarted = false
     private var activityDestroying = false
@@ -112,6 +128,18 @@ class MainActivity : AppCompatActivity() {
                 ?.let(::publishDownloadNotification)
         }
     }
+    private val webPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        val pending = pendingWebPermission ?: return@registerForActivityResult
+        pendingWebPermission = null
+        permissionPrompt = null
+        val granted = pending.runtimePermissions.all { permission ->
+            results[permission] == true ||
+                ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+        }
+        if (granted) pending.request.grant() else pending.request.deny()
+    }
     private val browserRoleLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) {
@@ -121,6 +149,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        WindowCompat.enableEdgeToEdge(window)
         WindowCompat.getInsetsController(window, window.decorView).apply {
             isAppearanceLightStatusBars = false
             isAppearanceLightNavigationBars = false
@@ -133,6 +162,7 @@ class MainActivity : AppCompatActivity() {
         restoreSavedDownloads()
         createDownloadNotificationChannel()
         buildLayout()
+        installBackHandler()
 
         testCrashRenderer = BuildConfig.DEBUG &&
             intent.getBooleanExtra(EXTRA_TEST_CRASH_RENDERER, false)
@@ -148,7 +178,7 @@ class MainActivity : AppCompatActivity() {
 
         Log.i(
             TAG,
-            "CEF_ENGINE version=0.21.0 chromium=156.0.8078.88 " +
+            "CEF_ENGINE version=0.21.0 chromium=156.0.8078.96 " +
                 "abi=" + android.os.Build.SUPPORTED_ABIS.joinToString()
         )
         updateShieldButton()
@@ -159,9 +189,23 @@ class MainActivity : AppCompatActivity() {
         initialUrl: String,
         savedState: Bundle? = null,
         incognito: Boolean = false,
-        replaceWindowId: Int? = null
+        replaceWindowId: Int? = null,
+        existingBrowser: CefriumBrowser? = null,
+        loadInitialUrl: Boolean = true
     ) {
-        val instance = CefriumBrowser.createWithSurface(this, incognito)
+        val previousWindow = browserWindows.firstOrNull { it.id == activeWindowId }
+        if (previousWindow != null && previousWindow.browser !== existingBrowser) {
+            exitPageFullscreen()
+        }
+        if (previousWindow != null && previousWindow.browser !== existingBrowser &&
+            !hasActiveDownloadForBrowser(previousWindow.browser)
+        ) {
+            previousWindow.browser.setFocus(false)
+            previousWindow.browser.setMediaSessionEnabled(false)
+            previousWindow.browser.onPause()
+        }
+        val instance = existingBrowser ?: CefriumBrowser.createWithSurface(this, incognito)
+        val displayUrl = existingBrowser?.getUrl()?.takeIf(::isSupportedWebUrl) ?: initialUrl
         // Native pull-to-refresh triggers only after a downward overscroll at the page top.
         instance.setPullToRefreshEnabled(!BuildConfig.TV_LITE)
         Log.i(TAG, "PULL_TO_REFRESH_CONFIG native=${!BuildConfig.TV_LITE}")
@@ -169,15 +213,15 @@ class MainActivity : AppCompatActivity() {
         val window = browserWindows.firstOrNull { it.id == windowId }?.also {
             it.browser = instance
             it.title = "New tab"
-            it.url = initialUrl
-        } ?: BrowserWindow(windowId, instance, "New tab", initialUrl, incognito).also {
+            it.url = displayUrl
+        } ?: BrowserWindow(windowId, instance, "New tab", displayUrl, incognito).also {
             browserWindows.add(it)
         }
         activeWindowId = windowId
         browser = instance
         lastRequestedUrl = initialUrl
         searchField.hint = if (incognito) "Incognito browsing" else "Search or enter address"
-        searchField.setText(initialUrl)
+        searchField.setText(displayUrl)
         browserSlot.removeAllViews()
         updateWindowsButton()
         // Darken app chrome only. Keep each website in its own color scheme; never inject page recoloring.
@@ -185,6 +229,9 @@ class MainActivity : AppCompatActivity() {
         instance.setDarkMode(false)
         Log.i(TAG, "DARK_APP_CHROME_ENABLED websiteColorsUntouched=true")
         instance.setPageVisible(true)
+        instance.setFocus(true)
+        instance.setMediaSessionActivity(mediaSessionPendingIntent(windowId))
+        instance.setMediaSessionEnabled(true)
         if (BuildConfig.DEBUG && intent.getBooleanExtra(EXTRA_TEST_DOWNLOAD_PAGE, false)) {
             instance.addDocumentStartJavaScript(
                 """
@@ -331,6 +378,54 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread { if (activeWindowId == windowId) updateWindowsButton() }
                 Log.i(TAG, "PAGE_TITLE window=$windowId title=${if (window.incognito) "<private>" else title}")
             }
+
+            override fun onCreateWindow(
+                browser: CefriumBrowser,
+                popup: CefriumBrowser,
+                url: String,
+                userGesture: Boolean
+            ): Boolean {
+                if (browserWindows.size >= MAX_BROWSER_WINDOWS) {
+                    popup.close()
+                    Toast.makeText(this@MainActivity, "Close a tab before opening another", Toast.LENGTH_SHORT).show()
+                    return true
+                }
+                val popupUrl = popup.getUrl().orEmpty().ifBlank { url }
+                attachBrowser(
+                    popupUrl,
+                    incognito = window.incognito,
+                    existingBrowser = popup,
+                    loadInitialUrl = false
+                )
+                Log.i(TAG, "POPUP_TAB_OPENED parent=$windowId userGesture=$userGesture incognito=${window.incognito}")
+                return true
+            }
+
+            override fun onCloseWindow(browser: CefriumBrowser, popup: CefriumBrowser) {
+                val popupWindow = browserWindows.firstOrNull { it.browser === popup } ?: return
+                closeWindow(popupWindow.id, closeBrowser = false)
+                Log.i(TAG, "POPUP_TAB_CLOSED window=${popupWindow.id}")
+            }
+
+            override fun onPermissionRequest(browser: CefriumBrowser, request: CefriumPermissionRequest) {
+                handleWebPermissionRequest(request)
+            }
+
+            override fun onPermissionRequestCanceled(browser: CefriumBrowser, request: CefriumPermissionRequest) {
+                if (pendingWebPermission?.request === request) {
+                    permissionPrompt?.dismiss()
+                    permissionPrompt = null
+                    pendingWebPermission = null
+                }
+            }
+
+            override fun onFullscreenChanged(browser: CefriumBrowser, fullscreen: Boolean) {
+                runOnUiThread {
+                    if (activeWindowId == windowId && this@MainActivity.browser === browser) {
+                        setPageFullscreen(fullscreen)
+                    }
+                }
+            }
         })
 
 
@@ -447,15 +542,30 @@ class MainActivity : AppCompatActivity() {
         })
         Log.i(TAG, "DOWNLOAD_HANDLER_REGISTERED")
 
-        if (!incognito && savedState != null && initialUrl == lastSuccessfulUrl) {
-            instance.restoreState(savedState)
-        } else {
-            instance.loadUrl(initialUrl)
+        if (loadInitialUrl && existingBrowser == null) {
+            if (!incognito && savedState != null && initialUrl == lastSuccessfulUrl) {
+                instance.restoreState(savedState)
+            } else {
+                instance.loadUrl(initialUrl)
+            }
         }
         Log.i(
             TAG,
             "CEF_BROWSER_CREATED url=${if (incognito) "<private>" else initialUrl} incognito=$incognito activeRenderers=" +
                 CefriumBrowser.activeRenderProcessCount()
+        )
+    }
+
+    private fun mediaSessionPendingIntent(windowId: Int): PendingIntent {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra(EXTRA_MEDIA_WINDOW_ID, windowId)
+        }
+        return PendingIntent.getActivity(
+            this,
+            MEDIA_SESSION_REQUEST_CODE_BASE + windowId,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
     }
 
@@ -596,14 +706,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildLayout() {
-        val root = LinearLayout(this).apply {
+        rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(COLOR_APP_BACKGROUND)
         }
-        setContentView(root)
+        setContentView(rootLayout)
+        ViewCompat.setOnApplyWindowInsetsListener(rootLayout) { view, insets ->
+            val safeInsets = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            view.setPadding(safeInsets.left, safeInsets.top, safeInsets.right, safeInsets.bottom)
+            insets
+        }
 
         val content = FrameLayout(this).apply { setBackgroundColor(COLOR_APP_BACKGROUND) }
-        root.addView(content, LinearLayout.LayoutParams(
+        rootLayout.addView(content, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
         ))
 
@@ -676,7 +793,8 @@ class MainActivity : AppCompatActivity() {
             FrameLayout.LayoutParams.MATCH_PARENT
         ))
 
-        root.addView(buildBottomBar())
+        bottomBar = buildBottomBar()
+        rootLayout.addView(bottomBar)
     }
 
     private fun buildBottomBar(): View {
@@ -808,14 +926,137 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun handleWebPermissionRequest(request: CefriumPermissionRequest) {
+        if (pendingWebPermission != null || request.permissions.isEmpty()) {
+            request.deny()
+            return
+        }
+
+        val requested = request.permissions
+        if (requested.contains(CefriumPermission.OTHER) ||
+            (requested.contains(CefriumPermission.NFC) &&
+                !packageManager.hasSystemFeature(PackageManager.FEATURE_NFC))
+        ) {
+            request.deny()
+            return
+        }
+
+        val runtimePermissions = mutableListOf<String>()
+        val labels = requested.map { permission ->
+            when (permission) {
+                CefriumPermission.GEOLOCATION -> {
+                    runtimePermissions += Manifest.permission.ACCESS_COARSE_LOCATION
+                    "Location"
+                }
+                CefriumPermission.CAMERA -> {
+                    runtimePermissions += Manifest.permission.CAMERA
+                    "Camera"
+                }
+                CefriumPermission.MICROPHONE -> {
+                    runtimePermissions += Manifest.permission.RECORD_AUDIO
+                    "Microphone"
+                }
+                CefriumPermission.NOTIFICATIONS -> {
+                    if (Build.VERSION.SDK_INT >= 33) {
+                        runtimePermissions += Manifest.permission.POST_NOTIFICATIONS
+                    }
+                    "Notifications"
+                }
+                CefriumPermission.CLIPBOARD_READ -> "Clipboard access"
+                CefriumPermission.NFC -> "NFC"
+                CefriumPermission.OTHER -> "Other"
+            }
+        }
+        if (labels.isEmpty() || labels.contains("Other")) {
+            request.deny()
+            return
+        }
+
+        val pending = PendingWebPermission(request, runtimePermissions.distinct())
+        pendingWebPermission = pending
+        permissionPrompt = AlertDialog.Builder(this)
+            .setTitle("Allow site access?")
+            .setMessage("${request.origin} wants to use: ${labels.joinToString()}. You can block this request.")
+            .setPositiveButton("Allow") { _, _ ->
+                permissionPrompt = null
+                val missing = pending.runtimePermissions.filter { permission ->
+                    ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED
+                }
+                if (missing.isEmpty()) {
+                    pendingWebPermission = null
+                    request.grant()
+                } else {
+                    webPermissionLauncher.launch(missing.toTypedArray())
+                }
+            }
+            .setNegativeButton("Block") { _, _ ->
+                permissionPrompt = null
+                pendingWebPermission = null
+                request.deny()
+            }
+            .setOnCancelListener {
+                if (pendingWebPermission?.request === request) {
+                    permissionPrompt = null
+                    pendingWebPermission = null
+                    request.deny()
+                }
+            }
+            .create()
+        permissionPrompt?.show()
+    }
+
+    private fun exitPageFullscreen() {
+        if (!pageFullscreen) return
+        if (::browser.isInitialized) {
+            runCatching { browser.exitFullscreen() }
+                .onFailure { Log.w(TAG, "Unable to exit page fullscreen", it) }
+        }
+        setPageFullscreen(false)
+    }
+
+    private fun setPageFullscreen(fullscreen: Boolean) {
+        if (pageFullscreen == fullscreen) return
+        pageFullscreen = fullscreen
+        if (::bottomBar.isInitialized) {
+            bottomBar.visibility = if (fullscreen) View.GONE else View.VISIBLE
+        }
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            if (fullscreen) hide(WindowInsetsCompat.Type.systemBars())
+            else show(WindowInsetsCompat.Type.systemBars())
+        }
+        if (::rootLayout.isInitialized) ViewCompat.requestApplyInsets(rootLayout)
+    }
+
+    private fun installBackHandler() {
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                when {
+                    pageFullscreen -> {
+                        exitPageFullscreen()
+                    }
+                    showingDownloads -> showBrowser()
+                    ::browser.isInitialized && browser.canGoBack() -> browser.goBack()
+                    browserWindows.size > 1 -> closeWindow(activeWindowId)
+                    else -> {
+                        isEnabled = false
+                        onBackPressedDispatcher.onBackPressed()
+                        isEnabled = true
+                    }
+                }
+            }
+        })
+    }
+
     private fun showWindowsDialog() {
         if (browserWindows.isEmpty()) return
         val windows = browserWindows.toList()
         val labels = windows.map { item ->
             val activeMark = if (item.id == activeWindowId) "● " else ""
-            val mode = if (item.incognito) "Incognito · " else ""
-            val subtitle = if (item.incognito) "Private window" else item.url
-            "$activeMark$mode${item.title.ifBlank { "New tab" }}\n$subtitle"
+            val mode = if (item.incognito) " · Private" else ""
+            val name = BrowserWindowLabel.shortName(item.title)
+            val subtitle = BrowserWindowLabel.subtitle(item.url, item.incognito)
+            "$activeMark$name$mode\n$subtitle"
         }.toTypedArray()
 
         AlertDialog.Builder(this)
@@ -833,8 +1074,11 @@ class MainActivity : AppCompatActivity() {
         }
 
     private fun createNewWindow(incognito: Boolean) {
+        if (browserWindows.size >= MAX_BROWSER_WINDOWS) {
+            Toast.makeText(this, "Close a tab before opening another", Toast.LENGTH_SHORT).show()
+            return
+        }
         showBrowser()
-        if (::browser.isInitialized && !hasActiveDownloadForBrowser(browser)) browser.onPause()
         browserSlot.removeAllViews()
         rendererErrorPanel.visibility = View.GONE
         attachBrowser(HOME_URL, incognito = incognito)
@@ -845,11 +1089,19 @@ class MainActivity : AppCompatActivity() {
         if (windowId == activeWindowId) return
 
         browserWindows.firstOrNull { it.id == activeWindowId }?.browser?.let { current ->
-            if (!hasActiveDownloadForBrowser(current)) current.onPause()
+            if (!hasActiveDownloadForBrowser(current)) {
+                current.setFocus(false)
+                current.setMediaSessionEnabled(false)
+                current.onPause()
+            }
         }
+        exitPageFullscreen()
         browserSlot.removeAllViews()
         activeWindowId = target.id
         browser = target.browser
+        target.browser.setMediaSessionEnabled(true)
+        target.browser.setFocus(true)
+        target.browser.setPageVisible(true)
         target.browser.onResume()
         browserSlot.addView(target.browser.getSurfaceContainer(), FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
@@ -865,7 +1117,7 @@ class MainActivity : AppCompatActivity() {
         updateShieldButton()
     }
 
-    private fun closeWindow(windowId: Int) {
+    private fun closeWindow(windowId: Int, closeBrowser: Boolean = true) {
         val target = browserWindows.firstOrNull { it.id == windowId } ?: return
         if (hasActiveDownloadForBrowser(target.browser)) {
             Toast.makeText(this, "Wait for this window's download to finish", Toast.LENGTH_SHORT).show()
@@ -873,6 +1125,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val wasActive = target.id == activeWindowId
+        if (wasActive) exitPageFullscreen()
         if (wasActive) {
             val replacement = browserWindows.firstOrNull { it.id != target.id }
             if (replacement != null) {
@@ -883,8 +1136,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
         browserWindows.removeAll { it.id == target.id }
-        runCatching { target.browser.close() }
-            .onFailure { Log.w(TAG, "Unable to close browser window id=${target.id}", it) }
+        if (closeBrowser) {
+            runCatching { target.browser.close() }
+                .onFailure { Log.w(TAG, "Unable to close browser window id=${target.id}", it) }
+        }
 
         if (target.incognito && browserWindows.none { it.incognito }) {
             privateDownloadIds.toList().forEach { id ->
@@ -979,6 +1234,14 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        val mediaWindowId = intent.getIntExtra(EXTRA_MEDIA_WINDOW_ID, -1)
+        if (mediaWindowId >= 0) {
+            if (browserWindows.any { it.id == mediaWindowId }) {
+                switchWindow(mediaWindowId)
+                showBrowser()
+            }
+            return
+        }
         if (intent.getBooleanExtra(EXTRA_SHOW_DOWNLOADS, false)) {
             showDownloadsPanel()
             return
@@ -1828,20 +2091,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
-    @Deprecated("Use the activity back dispatcher")
-    override fun onBackPressed() {
-        when {
-            showingDownloads -> showBrowser()
-            ::browser.isInitialized && browser.canGoBack() -> browser.goBack()
-            browserWindows.size > 1 -> closeWindow(activeWindowId)
-            else -> super.onBackPressed()
-        }
-    }
-
     override fun onPause() {
         // Keep only browser instances that own an active transfer running.
+        exitPageFullscreen()
         browserWindows.forEach { window ->
-            if (!hasActiveDownloadForBrowser(window.browser)) window.browser.onPause()
+            if (!hasActiveDownloadForBrowser(window.browser)) {
+                window.browser.setFocus(false)
+                window.browser.onPause()
+            }
         }
         super.onPause()
     }
@@ -1849,8 +2106,16 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         browserWindows.forEach { window ->
-            if (window.id == activeWindowId) window.browser.onResume()
-            else if (!hasActiveDownloadForBrowser(window.browser)) window.browser.onPause()
+            if (window.id == activeWindowId) {
+                window.browser.setMediaSessionEnabled(true)
+                window.browser.setFocus(true)
+                window.browser.setPageVisible(true)
+                window.browser.onResume()
+            } else if (!hasActiveDownloadForBrowser(window.browser)) {
+                window.browser.setMediaSessionEnabled(false)
+                window.browser.setFocus(false)
+                window.browser.onPause()
+            }
         }
         if (DownloadKeepAliveService.isRunning) {
             restoreSavedDownloads()
@@ -1907,6 +2172,9 @@ class MainActivity : AppCompatActivity() {
         val COLOR_ACCENT_SURFACE = 0xFF263B59.toInt()
         val COLOR_DANGER_SURFACE = 0xFF4B292C.toInt()
         val COLOR_DANGER_TEXT = 0xFFFFB4AB.toInt()
+        const val MAX_BROWSER_WINDOWS = 8
+        const val MEDIA_SESSION_REQUEST_CODE_BASE = 5100
+        const val EXTRA_MEDIA_WINDOW_ID = "com.search.browser.MEDIA_WINDOW_ID"
         const val PREFERENCES = "browser_preferences"
         const val HOME_URL = "https://www.google.com/"
         const val DOWNLOAD_NOTIFICATION_ID = 4103

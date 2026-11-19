@@ -11,9 +11,9 @@ android {
     defaultConfig {
         applicationId = "com.search.browser"
         minSdk = 29
-        targetSdk = 35
-        versionCode = 15
-        versionName = "1.0.14"
+        targetSdk = 36
+        versionCode = 16
+        versionName = "1.0.15"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -67,11 +67,12 @@ android {
 }
 
 dependencies {
+    implementation("androidx.activity:activity:1.13.0")
     implementation("com.cefrium:cefrium-sdk:0.21.0")
-    implementation("androidx.appcompat:appcompat:1.7.0")
-    implementation("androidx.mediarouter:mediarouter:1.7.0")
-    implementation("androidx.core:core:1.16.0")
-    implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
-    implementation("androidx.browser:browser:1.8.0")
+    implementation("androidx.appcompat:appcompat:1.8.0")
+    implementation("androidx.mediarouter:mediarouter:1.8.1")
+    implementation("androidx.core:core:1.19.1")
+    implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.2.0")
+    implementation("androidx.browser:browser:1.10.0")
     testImplementation("junit:junit:4.13.2")
 }

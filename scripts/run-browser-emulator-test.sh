@@ -71,10 +71,10 @@ wait_for_log() {
   return 1
 }
 
-wait_for_log "CEF_ENGINE version=0.21.0 chromium=156.0.8078.88" 1 90
+wait_for_log "CEF_ENGINE version=0.21.0 chromium=156.0.8078.96" 1 90
 wait_for_log "PAGE_TITLE window=1 title=Example Domain" 1 120
 wait_for_log "PAGE_LOAD_STATE loading=false" 1 120
-wait_for_log "DARK_MODE_SCRIPT_REGISTERED allOrigins=true" 1 60
+wait_for_log "DARK_APP_CHROME_ENABLED websiteColorsUntouched=true" 1 60
 wait_for_log "PAGE_BITMAP_CAPTURED url=https://example.com/" 1 60
 wait_for_log "TEST_RENDERER_CRASH_ARMED" 1 30
 sleep 1
@@ -86,7 +86,7 @@ wait_for_log "CHROMIUM_RENDERER_TERMINATED" 1 60
 wait_for_log "CHROMIUM_RECOVERY_STARTED" 1 30
 wait_for_log "PAGE_TITLE window=1 title=Example Domain" 2 120
 wait_for_log "CHROMIUM_RECOVERY_COMPLETED" 1 120
-wait_for_log "DARK_MODE_SCRIPT_REGISTERED allOrigins=true" 2 60
+wait_for_log "DARK_APP_CHROME_ENABLED websiteColorsUntouched=true" 2 60
 wait_for_log "PAGE_BITMAP_CAPTURED url=https://example.com/" 2 60
 sleep 1
 adb exec-out screencap -p > "$ARTIFACTS/page-after-renderer-recovery.png"
@@ -206,10 +206,10 @@ wait_for_log "BROWSER_CLOSED_AFTER_DOWNLOAD" 1 30
 
 PAGE_LOG="$(adb logcat -d -s Browser:V 2>/dev/null)"
 for required in \
-  "CEF_ENGINE version=0.21.0 chromium=156.0.8078.88" \
+  "CEF_ENGINE version=0.21.0 chromium=156.0.8078.96" \
   "PAGE_TITLE window=1 title=Example Domain" \
   "PAGE_LOAD_STATE loading=false" \
-  "DARK_MODE_SCRIPT_REGISTERED allOrigins=true" \
+  "DARK_APP_CHROME_ENABLED websiteColorsUntouched=true" \
   "CHROMIUM_RENDERER_TERMINATED" \
   "CHROMIUM_RECOVERY_STARTED" \
   "CHROMIUM_RECOVERY_COMPLETED"; do
@@ -219,9 +219,9 @@ for required in \
   fi
 done
 
-DARK_MODE_SCRIPT_COUNT="$(grep -F -c "DARK_MODE_SCRIPT_REGISTERED allOrigins=true" <<<"$PAGE_LOG" || true)"
-if (( DARK_MODE_SCRIPT_COUNT < 2 )); then
-  echo "The adaptive dark-mode document-start script was not re-registered after renderer recovery." >&2
+DARK_APP_CHROME_COUNT="$(grep -F -c "DARK_APP_CHROME_ENABLED websiteColorsUntouched=true" <<<"$PAGE_LOG" || true)"
+if (( DARK_APP_CHROME_COUNT < 2 )); then
+  echo "Dark app chrome was not configured for both the original and recovered browser tabs." >&2
   exit 1
 fi
 
@@ -313,7 +313,7 @@ def visible_content_ratio(path: Path) -> float:
 
     y0, y1 = height // 10, height * 9 // 10
     x0, x1 = width // 20, width * 19 // 20
-    visible = dark = total = 0
+    visible = dark = light = total = 0
     for y in range(y0, y1):
         row = rows[y]
         for x in range(x0, x1):
@@ -324,18 +324,20 @@ def visible_content_ratio(path: Path) -> float:
                 visible += 1
             if max(rgb) <= 40:
                 dark += 1
+            if min(rgb) >= 180:
+                light += 1
     denominator = max(total, 1)
-    return visible / denominator, dark / denominator
+    return visible / denominator, dark / denominator, light / denominator
 
 before = folder / "page-before-renderer-restart.png"
 after = folder / "page-after-renderer-recovery.png"
-ratio_before, dark_ratio_before = visible_content_ratio(before) if before.is_file() else (0.0, 0.0)
-ratio_after, dark_ratio_after = visible_content_ratio(after) if after.is_file() else (0.0, 0.0)
+ratio_before, dark_ratio_before, light_ratio_before = visible_content_ratio(before) if before.is_file() else (0.0, 0.0, 0.0)
+ratio_after, dark_ratio_after, light_ratio_after = visible_content_ratio(after) if after.is_file() else (0.0, 0.0, 0.0)
 report = {
     "application_id": "com.search.browser",
     "engine": "Chromium via Cefrium",
     "cefrium_version": "0.21.0",
-    "chromium_version": "156.0.8078.88",
+    "chromium_version": "156.0.8078.96",
     "android_api": int(api),
     "process_id_after_test": pid,
     "screenshot_metrics": {
@@ -343,16 +345,18 @@ report = {
         "after_recovery_visible_pixel_ratio": round(ratio_after, 4),
         "before_recovery_dark_pixel_ratio": round(dark_ratio_before, 4),
         "after_recovery_dark_pixel_ratio": round(dark_ratio_after, 4),
+        "before_recovery_light_pixel_ratio": round(light_ratio_before, 4),
+        "after_recovery_light_pixel_ratio": round(light_ratio_after, 4),
         "minimum_required_after_recovery_visible_ratio": 0.01,
-        "minimum_required_dark_pixel_ratio": 0.80,
+        "minimum_required_native_website_light_pixel_ratio": 0.55,
     },
     "checks": {
         "apk_installed": (folder / "install.txt").exists(),
-        "cefrium_chromium_engine_logged": "CEF_ENGINE version=0.21.0 chromium=156.0.8078.88" in log,
+        "cefrium_chromium_engine_logged": "CEF_ENGINE version=0.21.0 chromium=156.0.8078.96" in log,
         "page_title_verified": "PAGE_TITLE window=1 title=Example Domain" in log,
         "page_load_completed": "PAGE_LOAD_STATE loading=false" in log,
-        "dark_mode_document_script_registered_for_both_renderers": log.count("DARK_MODE_SCRIPT_REGISTERED allOrigins=true") >= 2,
-        "dark_mode_dark_background_verified": dark_ratio_before >= 0.80 and dark_ratio_after >= 0.80,
+        "dark_app_chrome_enabled_for_both_renderers": log.count("DARK_APP_CHROME_ENABLED websiteColorsUntouched=true") >= 2,
+        "website_native_colors_not_forced_dark": light_ratio_before >= 0.55 and light_ratio_after >= 0.55,
         "surface_bitmap_captured_before_crash": log.count("PAGE_BITMAP_CAPTURED url=https://example.com/") >= 1,
         "renderer_termination_callback": "CHROMIUM_RENDERER_TERMINATED" in log,
         "fresh_browser_created": "CHROMIUM_RECOVERY_STARTED" in log,
@@ -382,5 +386,5 @@ if report["result"] != "PASS":
     raise SystemExit(1)
 PY
 
-echo "PASS: API $EXPECTED_API rendered Example Domain with a dark background, recovered the Chromium renderer, downloaded files, and completed a download after its Activity task was removed." | tee "$ARTIFACTS/result.txt"
-echo "PASS: API $EXPECTED_API - adaptive dark mode, Chromium recovery, public downloads, notifications, and close-app download continuation." >> "$GITHUB_STEP_SUMMARY"
+echo "PASS: API $EXPECTED_API rendered Example Domain with native website colors and dark app chrome, recovered Chromium, and completed download checks." | tee "$ARTIFACTS/result.txt"
+echo "PASS: API $EXPECTED_API - readable dark app chrome, unchanged website colors, Chromium recovery, downloads, notifications, and background download continuation." >> "$GITHUB_STEP_SUMMARY"
