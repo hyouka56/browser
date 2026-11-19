@@ -126,7 +126,7 @@ run_adblock_phase() {
   local phase="$1"
   local expected_enabled="$2"
   local expected_blocked="$3"
-  local create_second_window="$4:-false"
+  local create_second_window="${4:-false}"
 
   adb logcat -d -v threadtime > "$ARTIFACTS/adblock-$phase-previous-logcat.txt" 2>&1 || true
   adb logcat -c
