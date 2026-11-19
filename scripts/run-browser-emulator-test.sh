@@ -184,7 +184,7 @@ run_adblock_phase() {
 run_adblock_phase "enabled-default" "true" "yes"
 
 # Open a second live browser window and prove that the shield affects both.
-tap_accessibility_node desc "Show all windows"
+tap_accessibility_node desc "1 windows"
 tap_accessibility_node text "New window"
 wait_for_log "AD_BLOCK_CONFIG enabled=true tvLite=false" 2 90
 tap_accessibility_node desc "Ad blocker on"
