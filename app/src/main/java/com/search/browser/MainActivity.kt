@@ -721,7 +721,18 @@ class MainActivity : AppCompatActivity() {
             val safeInsets = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
             )
-            view.setPadding(safeInsets.left, safeInsets.top, safeInsets.right, safeInsets.bottom)
+            val imeBottom = if (insets.isVisible(WindowInsetsCompat.Type.ime())) {
+                insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+            } else {
+                0
+            }
+            // Keep the browser viewport above the keyboard so focused page fields stay visible.
+            view.setPadding(
+                safeInsets.left,
+                safeInsets.top,
+                safeInsets.right,
+                maxOf(safeInsets.bottom, imeBottom)
+            )
             insets
         }
 
