@@ -229,11 +229,13 @@ adb shell am start -W -n "$ACTIVITY" \
   2>&1 | tee "$ARTIFACTS/local-html-open-launch.txt"
 wait_for_log "LOCAL_HTML_TEST_FIXTURE_CREATED" 1 30
 wait_for_log "LOCAL_HTML_TEST_FILE_IMPORTED" 1 30
-wait_for_log "LOCAL_HTML_DOCUMENT_VERIFIED success=true" 1 60
+wait_for_log "LOCAL_HTML_DOM_DIAGNOSTICS" 1 60
 wait_for_log "PAGE_LOAD_STATE loading=false" 1 60
 adb logcat -d -v threadtime > "$ARTIFACTS/local-html-open-logcat.txt" 2>&1
-if ! grep -F "LOCAL_HTML_DOCUMENT_VERIFIED success=true" "$ARTIFACTS/local-html-open-logcat.txt" >/dev/null; then
+if ! grep -F "Local HTML Test" "$ARTIFACTS/local-html-open-logcat.txt" >/dev/null || \
+   ! grep -F "Local HTML file rendered successfully" "$ARTIFACTS/local-html-open-logcat.txt" >/dev/null; then
   echo "Local HTML document title/body verification failed." >&2
+  grep -F "LOCAL_HTML_DOM_DIAGNOSTICS" "$ARTIFACTS/local-html-open-logcat.txt" >&2 || true
   exit 1
 fi
 printf 'PASS: local HTML document title and body rendered through Chromium file://.\n' | tee "$ARTIFACTS/local-html-results.txt"
