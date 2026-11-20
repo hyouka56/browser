@@ -17,6 +17,7 @@ data class DownloadRecord(
     var interrupted: Boolean,
     var updatedAt: Long,
     var mimeType: String = "application/octet-stream",
+    var saveFailed: Boolean = false,
     @Transient var liveItem: CefriumBrowser.DownloadItem? = null
 ) {
     fun isSelectableForDeletion(isSavingToPublicDownloads: Boolean): Boolean =

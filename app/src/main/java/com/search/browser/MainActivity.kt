@@ -18,6 +18,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.content.pm.PackageManager
 import android.provider.MediaStore
 import android.provider.OpenableColumns
@@ -108,6 +109,8 @@ class MainActivity : AppCompatActivity() {
     private val downloadRecords = LinkedHashMap<Int, DownloadRecord>()
     private val activeDownloadItems = LinkedHashMap<Int, CefriumBrowser.DownloadItem>()
     private val downloadSuggestedNames = LinkedHashMap<Int, String>()
+    private val downloadStagingFiles = LinkedHashMap<Int, File>()
+    private val downloadSpeedTrackers = LinkedHashMap<Int, DownloadSpeedTracker>()
     private val selectedDownloadIds = linkedSetOf<Int>()
     private val pendingPublicSaveIds = mutableSetOf<Int>()
     private var adBlockingEnabled = true
@@ -197,6 +200,7 @@ class MainActivity : AppCompatActivity() {
         }
         attachBrowser(startUrl, savedInstanceState?.getBundle(KEY_BROWSER_STATE))
         if (intent.getBooleanExtra(EXTRA_SHOW_DOWNLOADS, false)) showDownloadsPanel()
+        retryCompletedStagingSavesAfterRestore()
 
         Log.i(
             TAG,
@@ -294,7 +298,8 @@ class MainActivity : AppCompatActivity() {
                             "download-test.txt",
                             "text/plain",
                             "Browser download integration test\n",
-                            "0"
+                            "0",
+                            "30vh"
                         );
                         addDownloadButton(
                             "download-apk-test",
@@ -302,7 +307,17 @@ class MainActivity : AppCompatActivity() {
                             "download-test.apk",
                             "application/vnd.android.package-archive",
                             "APK download notification fixture",
-                            "50vh"
+                            "32vh",
+                            "25vh"
+                        );
+                        addDownloadButton(
+                            "download-concurrent-test",
+                            "Download while another file is pending",
+                            "download-concurrent-test.txt",
+                            "text/plain",
+                            "A second download completed while the first was waiting.\n",
+                            "60vh",
+                            "20vh"
                         );
                         addDownloadButton(
                             "download-background-test",
@@ -538,16 +553,24 @@ class MainActivity : AppCompatActivity() {
                 val name = DownloadFileSupport.normalizedName(suggestedName, urlName, mimeType)
                 val downloadId = item.getId()
 
-                val otherActiveDownload = activeDownloadItems.entries.firstOrNull { (activeId, activeItem) ->
+                val otherBrowserDownload = activeDownloadItems.entries.firstOrNull { (activeId, activeItem) ->
                     activeId != downloadId &&
+                        downloadBrowserOwners[activeId] !== instance &&
                         !activeItem.isComplete() && !activeItem.isCanceled() && !activeItem.isInterrupted()
                 }
-                if (otherActiveDownload != null) {
+                if (otherBrowserDownload != null) {
                     Log.w(
                         TAG,
                         "DOWNLOAD_REQUEST_REJECTED id=$downloadId name=${if (window.incognito) "<private>" else name} " +
-                            "reason=another_download_active activeId=${otherActiveDownload.key}"
+                            "reason=another_browser_has_active_download activeId=${otherBrowserDownload.key}"
                     )
+                    runOnUiThread {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "A download is already running in another tab. Wait for it to finish.",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
                     callback.cancel()
                     return
                 }
@@ -561,6 +584,7 @@ class MainActivity : AppCompatActivity() {
 
                 val target = File(stagingDirectory, "$downloadId-$name")
                 target.delete()
+                downloadStagingFiles[downloadId] = target
                 activeDownloadItems[downloadId] = item
                 downloadBrowserOwners[downloadId] = instance
                 if (window.incognito) privateDownloadIds.add(downloadId)
@@ -568,6 +592,8 @@ class MainActivity : AppCompatActivity() {
                 if (!startDownloadKeepAliveService(name, privateMode = window.incognito)) {
                     activeDownloadItems.remove(downloadId)
                     downloadBrowserOwners.remove(downloadId)
+                    downloadStagingFiles.remove(downloadId)
+                    downloadSpeedTrackers.remove(downloadId)
                     privateDownloadIds.remove(downloadId)
                     downloadSuggestedNames.remove(downloadId)
                     Log.e(TAG, "DOWNLOAD_REQUEST_REJECTED id=$downloadId name=${if (window.incognito) "<private>" else name} reason=background_service_unavailable")
@@ -1542,18 +1568,33 @@ class MainActivity : AppCompatActivity() {
             item?.getMimeType().orEmpty().ifBlank { mimeType }
         )
         record.url = item?.getUrl().orEmpty().ifBlank { record.url }
-        val incomingPath = path.ifBlank { item?.getFullPath().orEmpty() }
+        val incomingPath = path.ifBlank {
+            item?.getFullPath().orEmpty().ifBlank {
+                downloadStagingFiles[downloadId]?.absolutePath.orEmpty()
+            }
+        }
         if (!record.path.startsWith("content://") && incomingPath.isNotBlank()) {
             record.path = incomingPath
         }
         record.totalBytes = item?.getTotalBytes() ?: record.totalBytes
         record.receivedBytes = item?.getReceivedBytes() ?: record.receivedBytes
-        record.speedBytesPerSecond = item?.getCurrentSpeed() ?: 0L
         record.percent = (item?.getPercentComplete() ?: percent).coerceIn(0, 100)
         record.complete = complete || (item?.isComplete() == true)
+        if (record.complete) record.saveFailed = false
         record.paused = item?.isPaused() == true
         record.canceled = canceled || (item?.isCanceled() == true)
         record.interrupted = item?.isInterrupted() == true
+        record.speedBytesPerSecond = if (
+            record.complete || record.paused || record.canceled || record.interrupted
+        ) {
+            downloadSpeedTrackers.remove(downloadId)
+            0L
+        } else if (item != null) {
+            downloadSpeedTrackers.getOrPut(downloadId) { DownloadSpeedTracker() }
+                .update(record.receivedBytes, SystemClock.elapsedRealtime())
+        } else {
+            0L
+        }
         record.updatedAt = System.currentTimeMillis()
         record.liveItem = if (record.complete || record.canceled || record.interrupted) null else item
 
@@ -1561,7 +1602,12 @@ class MainActivity : AppCompatActivity() {
         if (record.complete || record.canceled || record.interrupted) {
             activeDownloadItems.remove(downloadId)
         }
-        if (record.canceled) deleteCanceledPartialDownload(record)
+        if (record.canceled) {
+            deleteCanceledPartialDownload(record)
+            downloadStagingFiles.remove(downloadId)
+        } else if (record.interrupted && !record.complete) {
+            downloadStagingFiles.remove(downloadId)
+        }
         if (record.complete && !record.path.startsWith("content://")) {
             persistDownloads()
             if (showingDownloads) renderDownloads()
@@ -1574,6 +1620,50 @@ class MainActivity : AppCompatActivity() {
         if (showingDownloads) renderDownloads()
     }
 
+    private fun retryCompletedStagingSavesAfterRestore() {
+        val pending = downloadRecords.values.filter { record ->
+            (record.complete || record.saveFailed) && isOwnedStagingDownload(record)
+        }
+        if (pending.isNotEmpty()) {
+            Log.i(TAG, "DOWNLOAD_PUBLIC_SAVE_RECOVERY count=${pending.size}")
+            pending.forEach { record ->
+                record.complete = true
+                record.interrupted = false
+                record.saveFailed = false
+                record.percent = 100
+                saveCompletedDownloadToPublicDownloads(record)
+            }
+        }
+    }
+
+    private fun isOwnedStagingDownload(record: DownloadRecord): Boolean {
+        val path = record.path.takeIf { it.isNotBlank() && !it.startsWith("content://") } ?: return false
+        val file = runCatching { File(path).canonicalFile }.getOrNull() ?: return false
+        val stagingDirectory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+            ?: File(filesDir, "downloads")
+        return runCatching {
+            file.isFile &&
+                file.name.startsWith("${record.id}-") &&
+                file.parentFile == stagingDirectory.canonicalFile
+        }.getOrDefault(false)
+    }
+
+    private fun retrySaveCompletedDownload(record: DownloadRecord) {
+        if (pendingPublicSaveIds.contains(record.id)) return
+        if (!record.saveFailed || !isOwnedStagingDownload(record)) {
+            Toast.makeText(this, "The temporary download file is no longer available", Toast.LENGTH_LONG).show()
+            return
+        }
+        record.complete = true
+        record.interrupted = false
+        record.saveFailed = false
+        record.percent = 100
+        record.updatedAt = System.currentTimeMillis()
+        persistDownloads()
+        if (showingDownloads) renderDownloads()
+        saveCompletedDownloadToPublicDownloads(record)
+    }
+
     private fun saveCompletedDownloadToPublicDownloads(record: DownloadRecord) {
         if (!pendingPublicSaveIds.add(record.id)) return
         val downloadedFile = record.path.takeIf { it.isNotBlank() }?.let(::File)
@@ -1581,6 +1671,7 @@ class MainActivity : AppCompatActivity() {
             pendingPublicSaveIds.remove(record.id)
             record.interrupted = true
             record.complete = false
+            record.saveFailed = false
             record.updatedAt = System.currentTimeMillis()
             publishDownloadNotification(record)
             persistDownloads()
@@ -1591,8 +1682,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         Thread({
-            var destinationUri: Uri? = null
-            var failure: Throwable? = null
+            var savedUri: Uri? = null
             var extractedApk: File? = null
             var extractionDirectory: File? = null
             var sourceFile = downloadedFile
@@ -1617,59 +1707,100 @@ class MainActivity : AppCompatActivity() {
                 if (sourceFile.extension.equals("apk", true)) APK_MIME_TYPE else record.mimeType
             )
             try {
-                val values = ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
-                    put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
-                    put(MediaStore.MediaColumns.IS_PENDING, 1)
-                }
-                destinationUri = contentResolver.insert(
-                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                    values
-                ) ?: throw IllegalStateException("Unable to create a Downloads entry")
+                val expectedBytes = sourceFile.length()
+                for (attempt in 1..3) {
+                    var attemptUri: Uri? = null
+                    try {
+                        val values = ContentValues().apply {
+                            put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+                            put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                            put(MediaStore.MediaColumns.IS_PENDING, 1)
+                        }
+                        val createdUri = contentResolver.insert(
+                            MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                            values
+                        ) ?: throw IllegalStateException("Unable to create a Downloads entry")
+                        attemptUri = createdUri
 
-                val output = contentResolver.openOutputStream(destinationUri!!, "w")
-                    ?: throw IllegalStateException("Unable to open the Downloads file")
-                output.use { stream ->
-                    sourceFile.inputStream().use { input -> input.copyTo(stream) }
+                        val output = contentResolver.openOutputStream(createdUri, "w")
+                            ?: throw IllegalStateException("Unable to open the Downloads file")
+                        val copiedBytes = output.use { stream ->
+                            sourceFile.inputStream().buffered().use { input -> input.copyTo(stream) }
+                        }
+                        if (copiedBytes != expectedBytes) {
+                            throw IllegalStateException(
+                                "Incomplete Downloads copy: copied=$copiedBytes expected=$expectedBytes"
+                            )
+                        }
+
+                        val ready = ContentValues().apply {
+                            put(MediaStore.MediaColumns.IS_PENDING, 0)
+                        }
+                        val updated = contentResolver.update(createdUri, ready, null, null)
+                        if (updated <= 0) throw IllegalStateException("Unable to publish the Downloads file")
+
+                        savedUri = createdUri
+                        Log.i(
+                            TAG,
+                            "DOWNLOAD_PUBLIC_SAVE_VERIFIED id=${record.id} attempt=$attempt bytes=$copiedBytes"
+                        )
+                        break
+                    } catch (error: Throwable) {
+                        attemptUri?.let { uri ->
+                            runCatching { contentResolver.delete(uri, null, null) }
+                        }
+                        Log.w(
+                            TAG,
+                            "DOWNLOAD_PUBLIC_SAVE_RETRY id=${record.id} attempt=$attempt/3",
+                            error
+                        )
+                        if (attempt < 3) {
+                            runCatching { Thread.sleep(400L * attempt) }
+                        }
+                    }
                 }
 
-                val ready = ContentValues().apply {
-                    put(MediaStore.MediaColumns.IS_PENDING, 0)
-                }
-                val updated = contentResolver.update(destinationUri!!, ready, null, null)
-                if (updated <= 0) throw IllegalStateException("Unable to publish the Downloads file")
-                if (downloadedFile.exists() && !downloadedFile.delete()) {
-                    Log.w(TAG, "Temporary download could not be deleted: " + if (privateDownloadIds.contains(record.id)) "<private>" else downloadedFile.absolutePath)
-                }
-            } catch (error: Throwable) {
-                failure = error
-                destinationUri?.let { runCatching { contentResolver.delete(it, null, null) } }
-                if (privateDownloadIds.contains(record.id)) {
-                    Log.e(TAG, "Unable to save private downloaded file")
-                } else {
-                    Log.e(TAG, "Unable to save the downloaded file", error)
+                if (savedUri != null && downloadedFile.exists() && !downloadedFile.delete()) {
+                    Log.w(
+                        TAG,
+                        "Temporary download could not be deleted: " +
+                            if (privateDownloadIds.contains(record.id)) "<private>" else downloadedFile.absolutePath
+                    )
                 }
             } finally {
                 extractedApk?.let { if (it.exists()) it.delete() }
                 extractionDirectory?.deleteRecursively()
             }
 
-            val savedUri = destinationUri.takeIf { failure == null }
             runOnUiThread {
                 pendingPublicSaveIds.remove(record.id)
-                if (savedUri != null) {
+                val publicUri = savedUri
+                if (publicUri != null) {
                     record.name = displayName
-                    record.path = savedUri.toString()
+                    record.path = publicUri.toString()
                     record.mimeType = mimeType
                     record.complete = true
                     record.interrupted = false
+                    record.saveFailed = false
                     record.percent = 100
-                    Log.i(TAG, "DOWNLOAD_FILE_SAVED name=${if (privateDownloadIds.contains(record.id)) "<private>" else record.name} mimeType=$mimeType bytes=${record.receivedBytes} uri=${if (privateDownloadIds.contains(record.id)) "<private>" else savedUri}")
+                    downloadStagingFiles.remove(record.id)
+                    downloadSpeedTrackers.remove(record.id)
+                    Log.i(TAG, "DOWNLOAD_FILE_SAVED name=${if (privateDownloadIds.contains(record.id)) "<private>" else record.name} mimeType=$mimeType bytes=${record.receivedBytes} uri=${if (privateDownloadIds.contains(record.id)) "<private>" else publicUri}")
                 } else {
                     record.complete = false
                     record.interrupted = true
-                    Log.e(TAG, "DOWNLOAD_FILE_SAVE_FAILED name=${if (privateDownloadIds.contains(record.id)) "<private>" else record.name}")
+                    record.saveFailed = downloadedFile.isFile
+                    Log.e(TAG, "DOWNLOAD_FILE_SAVE_FAILED name=${if (privateDownloadIds.contains(record.id)) "<private>" else record.name} retryable=${record.saveFailed}")
+                    if (record.saveFailed) {
+                        runCatching {
+                            Toast.makeText(
+                                this,
+                                "File downloaded but could not be moved to Downloads. Tap Retry save.",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
                 }
                 record.updatedAt = System.currentTimeMillis()
                 val privateDownload = privateDownloadIds.contains(record.id)
@@ -1874,6 +2005,7 @@ class MainActivity : AppCompatActivity() {
         val statusText = when {
             record.complete && !isReadyToSelect -> "SAVING"
             record.complete -> "DONE"
+            record.saveFailed -> "SAVE FAILED"
             record.canceled -> "CANCELED"
             record.interrupted -> "INTERRUPTED"
             record.paused -> "PAUSED"
@@ -1885,6 +2017,7 @@ class MainActivity : AppCompatActivity() {
         val detail = when {
             record.complete && !isReadyToSelect -> "Saving to Downloads…"
             record.complete -> "Completed · ${formatBytes(record.receivedBytes)}"
+            record.saveFailed -> "File kept temporarily · Retry saving to Downloads"
             record.canceled -> "Canceled"
             record.interrupted -> "Download interrupted"
             record.paused -> "Paused · ${formatBytes(record.receivedBytes)} received"
@@ -1919,6 +2052,18 @@ class MainActivity : AppCompatActivity() {
                 toggleDownloadSelection(record.id)
                 true
             }
+        }
+
+        if (record.saveFailed && isOwnedStagingDownload(record)) {
+            val retryButton = downloadActionButton("Retry save", COLOR_BUTTON_SURFACE) {
+                retrySaveCompletedDownload(record)
+            }
+            card.addView(
+                retryButton,
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)).apply {
+                    topMargin = dp(12)
+                }
+            )
         }
 
         if (!record.complete && !record.canceled && !record.interrupted && findLiveDownload(record) != null) {
@@ -2104,6 +2249,7 @@ class MainActivity : AppCompatActivity() {
             .onSuccess {
                 record.paused = true
                 record.speedBytesPerSecond = 0L
+                downloadSpeedTrackers.remove(record.id)
                 record.updatedAt = System.currentTimeMillis()
                 publishDownloadNotification(record)
                 persistDownloads()
@@ -2125,6 +2271,7 @@ class MainActivity : AppCompatActivity() {
         runCatching { item.resume() }
             .onSuccess {
                 record.paused = false
+                downloadSpeedTrackers.remove(record.id)
                 record.updatedAt = System.currentTimeMillis()
                 publishDownloadNotification(record)
                 persistDownloads()
@@ -2148,6 +2295,7 @@ class MainActivity : AppCompatActivity() {
                 record.canceled = true
                 record.paused = false
                 record.speedBytesPerSecond = 0L
+                downloadSpeedTrackers.remove(record.id)
                 record.updatedAt = System.currentTimeMillis()
                 publishDownloadNotification(record)
                 persistDownloads()
@@ -2231,6 +2379,7 @@ class MainActivity : AppCompatActivity() {
                 put("paused", record.paused)
                 put("canceled", record.canceled)
                 put("interrupted", record.interrupted)
+                put("saveFailed", record.saveFailed)
                 put("updated", record.updatedAt)
             })
         }
@@ -2258,6 +2407,7 @@ class MainActivity : AppCompatActivity() {
                     canceled = item.optBoolean("canceled"),
                     interrupted = item.optBoolean("interrupted") || (!complete && !DownloadKeepAliveService.isRunning),
                     updatedAt = item.optLong("updated"),
+                    saveFailed = item.optBoolean("saveFailed"),
                     mimeType = item.optString("mime", "application/octet-stream")
                 )
                 downloadRecords[record.id] = record

@@ -326,7 +326,7 @@ if ! grep -F "download-test.txt" "$ARTIFACTS/notification-download-test.txt.txt"
   exit 1
 fi
 
-adb shell input tap 540 1500
+adb shell input tap 540 1120
 wait_for_log "DOWNLOAD_REQUEST_ACCEPTED name=download-test.apk" 1 60
 wait_for_log "DOWNLOAD_FILE_SAVED name=download-test.apk" 1 90
 APK_DOWNLOAD_FILE="/sdcard/Download/download-test.apk"
@@ -356,6 +356,19 @@ else
   adb shell input tap 540 1900
 fi
 wait_for_log "DOWNLOAD_BACKGROUND_ALLOW_DELAYED" 1 30
+# While the first request is deliberately waiting for its CEF allow callback,
+# start another file from the same browser window. Both must finish and be saved.
+adb shell input tap 540 1550
+wait_for_log "DOWNLOAD_REQUEST_ACCEPTED name=download-concurrent-test.txt" 1 60
+wait_for_log "DOWNLOAD_FILE_SAVED name=download-concurrent-test.txt" 1 90
+CONCURRENT_DOWNLOAD_FILE="/sdcard/Download/download-concurrent-test.txt"
+adb shell ls -l "$CONCURRENT_DOWNLOAD_FILE" > "$ARTIFACTS/concurrent-download-test.txt.txt" 2>&1 || true
+if ! adb shell test -s "$CONCURRENT_DOWNLOAD_FILE"; then
+  echo "Concurrent download was not found in public Downloads or is empty." >&2
+  adb shell ls -la /sdcard/Download >&2 || true
+  exit 1
+fi
+printf 'PASS: a second download completed while the same browser had a pending download.\n' | tee "$ARTIFACTS/concurrent-download-results.txt"
 wait_for_log "DOWNLOAD_KEEP_ALIVE_SERVICE_STARTED" 1 30
 wait_for_log "DOWNLOAD_KEEP_ALIVE_REQUESTED" 1 30
 STACK_ID="$(adb shell dumpsys activity activities | grep -F "$PACKAGE" | sed -nE 's/.*StackId=([0-9]+).*/\1/p; s/.*Task\{[^#]*#([0-9]+).*/\1/p' | head -n1 | tr -d '\r')"
@@ -579,6 +592,13 @@ report = {
         "after_recovery_screenshot_visibly_rendered": ratio_after >= 0.01,
         "text_file_download_saved": "DOWNLOAD_FILE_SAVED name=download-test.txt" in log,
         "apk_file_download_saved": "DOWNLOAD_FILE_SAVED name=download-test.apk" in log,
+        "concurrent_download_saved_while_another_was_pending": (
+            "DOWNLOAD_FILE_SAVED name=download-concurrent-test.txt" in log and
+            (folder / "concurrent-download-test.txt.txt").is_file() and
+            "PASS: a second download completed while the same browser had a pending download." in
+                (folder / "concurrent-download-results.txt").read_text()
+        ),
+        "public_download_copy_was_verified_before_publish": log.count("DOWNLOAD_PUBLIC_SAVE_VERIFIED") >= 4,
         "download_notification_posted": "DOWNLOAD_NOTIFICATION_POSTED name=download-test.apk" in log,
         "download_handler_registered": "DOWNLOAD_HANDLER_REGISTERED" in log,
         "download_callback_invoked": "DOWNLOAD_BEFORE_CALLBACK id=" in log,
