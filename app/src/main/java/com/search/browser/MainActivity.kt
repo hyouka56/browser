@@ -449,6 +449,24 @@ class MainActivity : AppCompatActivity() {
                     }
                     if (BuildConfig.DEBUG && isActiveWindow && !window.incognito) {
                         browserSlot.postDelayed({ captureAndVerifyPage(instance, pageUrl) }, 1000L)
+                        if (intent.getBooleanExtra(EXTRA_TEST_OPEN_HTML_FILE, false) &&
+                            pageUrl.startsWith("file://")
+                        ) {
+                            browserSlot.postDelayed({
+                                instance.evaluateJavaScript(
+                                    """(() => {
+                                        const title = (document.title || "").trim();
+                                        const body = (document.body?.innerText || "")
+                                            .replace(/\s+/g, " ").trim();
+                                        return title === "Local HTML Test" &&
+                                            body.includes("Local HTML file rendered successfully");
+                                    })()"""
+                                ) { result ->
+                                    val verified = result?.trim()?.trim('"') == "true"
+                                    Log.i(TAG, "LOCAL_HTML_DOCUMENT_VERIFIED success=$verified result=$result")
+                                }
+                            }, 500L)
+                        }
                     }
                 }
             }
