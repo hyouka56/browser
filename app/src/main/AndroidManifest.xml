@@ -7,7 +7,9 @@
     <application
         android:name=".BrowserApp"
         android:allowBackup="false"
-        android:label="MCP AI"
+        android:icon="@drawable/ic_launcher"
+        android:label="Browser"
+        android:roundIcon="@drawable/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="false">
