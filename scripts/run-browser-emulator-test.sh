@@ -233,12 +233,13 @@ wait_for_log "LOCAL_HTML_DOM_DIAGNOSTICS" 1 60
 wait_for_log "PAGE_LOAD_STATE loading=false" 1 60
 adb logcat -d -v threadtime > "$ARTIFACTS/local-html-open-logcat.txt" 2>&1
 if ! grep -F "Local HTML Test" "$ARTIFACTS/local-html-open-logcat.txt" >/dev/null || \
-   ! grep -F "Local HTML file rendered successfully" "$ARTIFACTS/local-html-open-logcat.txt" >/dev/null; then
+   ! grep -F "Local HTML file rendered successfully" "$ARTIFACTS/local-html-open-logcat.txt" >/dev/null || \
+   ! grep -F ".local-html.browser.invalid/" "$ARTIFACTS/local-html-open-logcat.txt" >/dev/null; then
   echo "Local HTML document title/body verification failed." >&2
   grep -F "LOCAL_HTML_DOM_DIAGNOSTICS" "$ARTIFACTS/local-html-open-logcat.txt" >&2 || true
   exit 1
 fi
-printf 'PASS: local HTML document title and body rendered through Chromium file://.\n' | tee "$ARTIFACTS/local-html-results.txt"
+printf 'PASS: local HTML document title and body rendered through the app content server.\n' | tee "$ARTIFACTS/local-html-results.txt"
 
 # Continue with the original renderer-recovery suite using a normal launch.
 adb logcat -d -v threadtime > "$ARTIFACTS/adblock-enabled-restored-final-logcat.txt" 2>&1

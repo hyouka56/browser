@@ -52,6 +52,8 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.cefrium.CefriumBrowser
+import com.cefrium.CefriumContentServers
+import com.cefrium.CefriumProfile
 import com.cefrium.CefriumChromeClient
 import com.cefrium.CefriumDownloadClient
 import com.cefrium.CefriumNavigationClient
@@ -192,8 +194,8 @@ class MainActivity : AppCompatActivity() {
         }
         val incomingUrl = intent.dataString?.takeIf(::isSupportedWebUrl)
         val startUrl = testUrl ?: incomingUrl
-            ?: incomingHtmlFile?.let { Uri.fromFile(it).toString() }
-            ?: testHtmlFile?.let { Uri.fromFile(it).toString() }
+            ?: incomingHtmlFile?.let(::localHtmlUrl)
+            ?: testHtmlFile?.let(::localHtmlUrl)
             ?: lastSuccessfulUrl
         if (incomingHtmlUri != null && incomingHtmlFile == null) {
             Toast.makeText(this, "Unable to open this HTML file", Toast.LENGTH_LONG).show()
@@ -232,7 +234,8 @@ class MainActivity : AppCompatActivity() {
             previousWindow.browser.onPause()
         }
         val instance = existingBrowser ?: CefriumBrowser.createWithSurface(this, incognito)
-        val displayUrl = existingBrowser?.getUrl()?.takeIf(::isSupportedWebUrl) ?: initialUrl
+        val currentUrl = existingBrowser?.getUrl()?.takeIf(::isSupportedWebUrl) ?: initialUrl
+        val displayUrl = addressBarText(currentUrl)
         // Native pull-to-refresh triggers only after a downward overscroll at the page top.
         instance.setPullToRefreshEnabled(!BuildConfig.TV_LITE)
         Log.i(TAG, "PULL_TO_REFRESH_CONFIG native=${!BuildConfig.TV_LITE}")
@@ -240,8 +243,8 @@ class MainActivity : AppCompatActivity() {
         val window = browserWindows.firstOrNull { it.id == windowId }?.also {
             it.browser = instance
             it.title = "New tab"
-            it.url = displayUrl
-        } ?: BrowserWindow(windowId, instance, "New tab", displayUrl, incognito).also {
+            it.url = currentUrl
+        } ?: BrowserWindow(windowId, instance, "New tab", currentUrl, incognito).also {
             browserWindows.add(it)
         }
         activeWindowId = windowId
@@ -409,7 +412,7 @@ class MainActivity : AppCompatActivity() {
                     lastRequestedUrl = url
                     runOnUiThread {
                         if (activeWindowId == windowId && !searchField.hasFocus()) {
-                            searchField.setText(url)
+                            searchField.setText(addressBarText(url))
                         }
                     }
                 }
@@ -434,7 +437,7 @@ class MainActivity : AppCompatActivity() {
                     Log.i(TAG, "AD_BLOCK_PAGE_STATS window=$windowId enabled=$adBlockingEnabled blockedRequests=${instance.getBlockedCount()}")
                     val pageUrl = instance.getUrl().orEmpty().ifBlank { window.url }
                     window.url = pageUrl
-                    if (pageUrl.startsWith("https://") || pageUrl.startsWith("http://")) {
+                    if (isSupportedWebUrl(pageUrl) && !isLocalHtmlUrl(pageUrl)) {
                         if (!window.incognito && isActiveWindow) {
                             lastSuccessfulUrl = pageUrl
                             preferences.edit().putString(KEY_LAST_URL, pageUrl).apply()
@@ -450,7 +453,7 @@ class MainActivity : AppCompatActivity() {
                     if (BuildConfig.DEBUG && isActiveWindow && !window.incognito) {
                         browserSlot.postDelayed({ captureAndVerifyPage(instance, pageUrl) }, 1000L)
                         if (intent.getBooleanExtra(EXTRA_TEST_OPEN_HTML_FILE, false) &&
-                            pageUrl.startsWith("file://")
+                            isLocalHtmlUrl(pageUrl)
                         ) {
                             browserSlot.postDelayed({
                                 instance.evaluateJavaScript(
@@ -1352,7 +1355,7 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Choose a valid HTML file", Toast.LENGTH_LONG).show()
             return
         }
-        val fileUrl = Uri.fromFile(file).toString()
+        val fileUrl = localHtmlUrl(file)
         showBrowser()
         rendererRecoveryAttempts = 0
         rendererRecoveryPending = false
@@ -1366,6 +1369,23 @@ class MainActivity : AppCompatActivity() {
             ?.hideSoftInputFromWindow(searchField.windowToken, 0)
         Log.i(TAG, "LOCAL_HTML_FILE_OPENED name=${file.name}")
     }
+
+    private fun localHtmlUrl(file: File): String {
+        val directory = file.parentFile ?: error("Local HTML file has no parent directory")
+        val origin = "https://${directory.name}.local-html.browser.invalid"
+        val server = CefriumContentServers.files(directory)
+        CefriumProfile.getDefault().registerContentServer(origin, server)
+        CefriumProfile.incognito().registerContentServer(origin, server)
+        Log.i(TAG, "LOCAL_HTML_CONTENT_SERVER_REGISTERED origin=$origin file=${file.name}")
+        return "$origin/${Uri.encode(file.name)}"
+    }
+
+    private fun isLocalHtmlUrl(url: String): Boolean =
+        Uri.parse(url).host?.endsWith(".local-html.browser.invalid", ignoreCase = true) == true
+
+    private fun addressBarText(url: String): String =
+        if (isLocalHtmlUrl(url)) Uri.parse(url).lastPathSegment?.takeIf { it.isNotBlank() } ?: "Local HTML file"
+        else url
 
     private fun isLocalHtmlDocument(uri: Uri, suppliedMimeType: String? = null): Boolean {
         val scheme = uri.scheme?.lowercase(Locale.ROOT)
@@ -1402,14 +1422,12 @@ class MainActivity : AppCompatActivity() {
             Log.w(TAG, "Rejected non-HTML document name=$displayName mimeType=$providerMimeType")
             return null
         }
-        val directory = File(cacheDir, "local-html")
-        val destination = File(
-            directory,
-            "${UUID.randomUUID()}-${HtmlDocumentSupport.safeFileName(displayName)}"
-        )
+        val cacheDirectory = File(cacheDir, "local-html")
+        val directory = File(cacheDirectory, UUID.randomUUID().toString())
+        val destination = File(directory, HtmlDocumentSupport.safeFileName(displayName))
         return runCatching {
             if (!directory.isDirectory && !directory.mkdirs()) {
-                error("Unable to create local HTML cache")
+                error("Unable to create isolated local HTML cache")
             }
             val input = contentResolver.openInputStream(uri)
                 ?: error("Unable to read the selected HTML file")
@@ -1421,6 +1439,7 @@ class MainActivity : AppCompatActivity() {
             destination
         }.onFailure { error ->
             destination.delete()
+            directory.delete()
             Log.e(TAG, "Unable to import HTML file name=$displayName", error)
         }.getOrNull()
     }
