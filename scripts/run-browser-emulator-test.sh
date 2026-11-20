@@ -135,6 +135,44 @@ PY
   adb shell input tap "$x" "$y"
 }
 
+# The Android 35 emulator can surface a system ANR dialog for Pixel Launcher
+# while Browser itself is healthy. Dismiss only that system dialog via its
+# accessible Wait button so it cannot intercept Browser test interactions.
+system_anr_dialog_visible() {
+  local hierarchy="$ARTIFACTS/system-anr-hierarchy-$RANDOM.xml"
+  adb shell uiautomator dump /sdcard/browser-window.xml >/dev/null 2>&1 || return 1
+  adb exec-out cat /sdcard/browser-window.xml > "$hierarchy" || return 1
+  python3 - "$hierarchy" <<'PY'
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+for node in root.iter("node"):
+    value = node.attrib.get("text", "")
+    if re.search(r"(?:isn't|is not) responding|application not responding", value, re.I):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+dismiss_system_anr_dialog() {
+  if ! system_anr_dialog_visible; then
+    return 0
+  fi
+  echo "System ANR dialog detected for another app; selecting Wait."
+  tap_accessibility_node text "Wait"
+  for attempt in $(seq 1 10); do
+    if ! system_anr_dialog_visible; then
+      echo "PASS: system ANR dialog dismissed without closing Browser."
+      return 0
+    fi
+    sleep 1
+  done
+  echo "System ANR dialog remained after selecting Wait." >&2
+  return 1
+}
+
 run_adblock_phase() {
   local phase="$1"
   local expected_enabled="$2"
@@ -199,6 +237,7 @@ run_adblock_phase() {
 run_adblock_phase "enabled-default" "true" "yes" "true"
 wait_for_log "AD_BLOCK_TEST_MULTIWINDOW_CREATED windows=2" 1 30
 wait_for_log "AD_BLOCK_CONFIG enabled=true tvLite=false" 2 90
+dismiss_system_anr_dialog
 
 # Use the actual shield control, not a synthetic state change.
 tap_accessibility_node desc "Ad blocker on"
@@ -283,25 +322,8 @@ adb shell am start -W -n "$ACTIVITY" \
   2>&1 | tee "$ARTIFACTS/launch-download-test.txt"
 wait_for_log "PAGE_TITLE window=1 title=Download Test" 1 60
 wait_for_log "DOWNLOAD_HANDLER_REGISTERED" 1 30
+dismiss_system_anr_dialog
 sleep 1
-
-# Android 35's emulator may show a system ANR dialog for Pixel Launcher after
-# renderer recovery. It is not the Browser process. Choose Wait so the modal
-# dialog does not swallow the test-page taps; never close the Browser under test.
-if adb shell dumpsys window 2>/dev/null | grep -F "Application Not Responding" >/dev/null; then
-  echo "System ANR dialog detected for another app; selecting Wait before download taps."
-  adb shell input tap 360 1340
-  for attempt in $(seq 1 10); do
-    if ! adb shell dumpsys window 2>/dev/null | grep -F "Application Not Responding" >/dev/null; then
-      break
-    fi
-    sleep 1
-  done
-  if adb shell dumpsys window 2>/dev/null | grep -F "Application Not Responding" >/dev/null; then
-    echo "System ANR dialog remained after choosing Wait." >&2
-    exit 1
-  fi
-fi
 
 # The app must be resumed after renderer recovery while the download page is still visible.
 # This assertion belongs before the later intentional removal of the task stack.
