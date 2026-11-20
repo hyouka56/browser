@@ -234,7 +234,7 @@ wait_for_log "PAGE_LOAD_STATE loading=false" 1 60
 adb logcat -d -v threadtime > "$ARTIFACTS/local-html-open-logcat.txt" 2>&1
 if ! grep -F "Local HTML Test" "$ARTIFACTS/local-html-open-logcat.txt" >/dev/null || \
    ! grep -F "Local HTML file rendered successfully" "$ARTIFACTS/local-html-open-logcat.txt" >/dev/null || \
-   ! grep -F ".local-html.browser.invalid/" "$ARTIFACTS/local-html-open-logcat.txt" >/dev/null; then
+   ! grep -F ".local-html.browser.invalid" "$ARTIFACTS/local-html-open-logcat.txt" >/dev/null; then
   echo "Local HTML document title/body verification failed." >&2
   grep -F "LOCAL_HTML_DOM_DIAGNOSTICS" "$ARTIFACTS/local-html-open-logcat.txt" >&2 || true
   exit 1
