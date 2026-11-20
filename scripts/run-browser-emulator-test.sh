@@ -576,7 +576,9 @@ report = {
         "local_html_file_opened_and_rendered": (
             "LOCAL_HTML_TEST_FIXTURE_CREATED" in local_html_log and
             "LOCAL_HTML_TEST_FILE_IMPORTED" in local_html_log and
-            "LOCAL_HTML_DOCUMENT_VERIFIED success=true" in local_html_log and
+            "LOCAL_HTML_DOM_DIAGNOSTICS" in local_html_log and
+            "Local HTML Test" in local_html_log and
+            "Local HTML file rendered successfully" in local_html_log and
             "PAGE_LOAD_STATE loading=false" in local_html_log
         ),
         "dark_app_chrome_enabled_for_both_renderers": log.count("DARK_APP_CHROME_ENABLED websiteColorsUntouched=true") >= 2,

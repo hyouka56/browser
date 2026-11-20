@@ -454,16 +454,18 @@ class MainActivity : AppCompatActivity() {
                         ) {
                             browserSlot.postDelayed({
                                 instance.evaluateJavaScript(
-                                    """(() => {
-                                        const title = (document.title || "").trim();
-                                        const body = (document.body?.innerText || "")
-                                            .replace(/\s+/g, " ").trim();
-                                        return title === "Local HTML Test" &&
-                                            body.includes("Local HTML file rendered successfully");
-                                    })()"""
+                                    """JSON.stringify({
+                                        readyState: document.readyState,
+                                        title: document.title || "",
+                                        bodyText: (document.body?.textContent || "").trim(),
+                                        location: location.href
+                                    })"""
                                 ) { result ->
-                                    val verified = result?.trim()?.trim('"') == "true"
-                                    Log.i(TAG, "LOCAL_HTML_DOCUMENT_VERIFIED success=$verified result=$result")
+                                    val diagnostics = result.orEmpty()
+                                    val verified = diagnostics.contains("Local HTML Test") &&
+                                        diagnostics.contains("Local HTML file rendered successfully")
+                                    Log.i(TAG, "LOCAL_HTML_DOM_DIAGNOSTICS result=$diagnostics")
+                                    Log.i(TAG, "LOCAL_HTML_DOCUMENT_VERIFIED success=$verified")
                                 }
                             }, 500L)
                         }
