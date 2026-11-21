@@ -466,7 +466,7 @@ adb exec-out screencap -p > "$ARTIFACTS/github-desktop-repository.png"
 adb shell uiautomator dump /sdcard/github-desktop-repository.xml >/dev/null 2>&1
 adb exec-out cat /sdcard/github-desktop-repository.xml > "$ARTIFACTS/github-desktop-repository-ui.xml"
 GITHUB_DESKTOP_DOM_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_DOM_DIAGNOSTICS window=1" | tail -n1 || true)"
-python3 - "$GITHUB_DESKTOP_DOM_LOG" <<'PY' | tee -a "$ARTIFACTS/desktop-site-results.txt"
+python3 - "$GITHUB_DESKTOP_DOM_LOG" "$ARTIFACTS/github-desktop-repository-ui.xml" <<'PY' | tee -a "$ARTIFACTS/desktop-site-results.txt"
 import json, re, sys
 match = re.search(r"result=(.*)$", sys.argv[1])
 if not match:
@@ -487,10 +487,27 @@ if not title.strip() or not body.strip() or "github" not in title.lower() and "b
     print(f"FAIL: GitHub repository page did not render in PC mode: {data}")
 else:
     print(f"PASS: GitHub repository page loaded in PC mode; title={title!r}, innerWidth={inner}px, client={client}px, documentScroll={doc_scroll}px, bodyScroll={body_scroll}px, bodyRect={body_rect}px, documentRect={doc_rect}px, visualScale={data.get('visualViewportScale')}")
-if inner < 1200 or client < 1200:
-    print(f"FAIL: GitHub did not receive a full desktop CSS viewport: innerWidth={inner}, clientWidth={client}")
+if not 1200 <= inner <= 1360 or not 1200 <= client <= 1360:
+    print(f"FAIL: GitHub CSS viewport is not close to the requested 1280px: innerWidth={inner}, clientWidth={client}")
 else:
-    print(f"PASS: GitHub received a desktop CSS viewport of {inner}px.")
+    print(f"PASS: GitHub CSS viewport is {inner}px, close to the requested 1280px.")
+# A full-width desktop layout must keep the repo's main content near the left edge.
+import xml.etree.ElementTree as ET
+ui_root = ET.parse(sys.argv[2]).getroot()
+repo_title = next((n for n in ui_root.iter("node") if n.attrib.get("resource-id") == "repo-title-component"), None)
+if repo_title is None:
+    print("FAIL: GitHub repo title container is missing from the visible hierarchy.")
+else:
+    bounds = re.search(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", repo_title.attrib.get("bounds", ""))
+    if not bounds:
+        print("FAIL: GitHub repo title has no measurable screen bounds.")
+    else:
+        left = int(bounds.group(1))
+        print(f"GitHub repo title starts at screen x={left}px.")
+        if left > 100:
+            print(f"FAIL: GitHub main content is shifted right ({left}px), reproducing the half-page layout.")
+        else:
+            print("PASS: GitHub main content begins near the left edge; no large blank left section.")
 overflow = max(doc_scroll, body_scroll, body_rect, doc_rect) > max(client, body_client, inner) + 8
 if overflow:
     print(f"FAIL: GitHub desktop layout extends beyond its viewport: inner={inner}, client={client}, docScroll={doc_scroll}, bodyClient={body_client}, bodyScroll={body_scroll}, bodyRect={body_rect}, documentRect={doc_rect}")
@@ -1046,8 +1063,12 @@ report = {
         "github_desktop_repository_has_no_horizontal_overflow": (
             "PASS: GitHub desktop repository page has no horizontal document/body overflow." in desktop_site_results
         ),
-        "github_desktop_css_viewport_is_at_least_1200px": (
-            "PASS: GitHub received a desktop CSS viewport of" in desktop_site_results
+        "github_desktop_css_viewport_is_near_1280px": (
+            "PASS: GitHub CSS viewport is" in desktop_site_results and
+            "close to the requested 1280px" in desktop_site_results
+        ),
+        "github_main_content_starts_near_left_edge": (
+            "PASS: GitHub main content begins near the left edge" in desktop_site_results
         ),
         "github_pc_mode_returns_to_mobile": (
             "PASS: GitHub repository page was tested with PC enabled and then returned to mobile mode." in desktop_site_results and

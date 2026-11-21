@@ -1356,12 +1356,17 @@ class MainActivity : AppCompatActivity() {
             val targetCssHeight = Math.round(
                 targetCssWidth.toDouble() * surfaceHeightPx.toDouble() / surfaceWidthPx.toDouble()
             ).toInt().coerceAtLeast(1)
+            // Map the full CSS desktop viewport onto the physical Android surface
+            // through DPR, not page zoom. Page zoom changes layout breakpoints and
+            // can move GitHub's main column off the visible left side.
+            val surfaceScale = (surfaceWidthPx.toDouble() / targetCssWidth.toDouble())
+                .coerceIn(0.1, 1.0)
             val deviceMetrics = JSONObject()
                 .put("width", targetCssWidth)
                 .put("height", targetCssHeight)
                 .put("screenWidth", targetCssWidth)
                 .put("screenHeight", targetCssHeight)
-                .put("deviceScaleFactor", 1.0)
+                .put("deviceScaleFactor", surfaceScale)
                 .put("mobile", false)
 
             target.executeDevToolsMethod(
@@ -1372,20 +1377,16 @@ class MainActivity : AppCompatActivity() {
                     it.id == activeWindowId && it.browser === target && it.desktopMode
                 } ?: return@executeDevToolsMethod
                 if (success) {
-                    val zoomFactor = (surfaceWidthPx.toDouble() / targetCssWidth.toDouble())
-                        .coerceIn(0.1, 1.0)
-                    val zoomLevel = (kotlin.math.ln(zoomFactor) / kotlin.math.ln(1.2))
-                        .coerceIn(-10.0, 0.0)
-                    target.setZoomLevel(zoomLevel)
-                    val factorText = String.format(Locale.ROOT, "%.4f", zoomFactor)
-                    val levelText = String.format(Locale.ROOT, "%.4f", zoomLevel)
+                    // Explicitly neutralize any previous page zoom; DPR performs the fit.
+                    target.setZoomLevel(0.0)
+                    val scaleText = String.format(Locale.ROOT, "%.4f", surfaceScale)
                     Log.i(
                         TAG,
-                        "DESKTOP_DEVICE_METRICS_APPLIED window=${currentWindow.id} cssWidth=$targetCssWidth cssHeight=$targetCssHeight deviceScaleFactor=1.0 mobile=false"
+                        "DESKTOP_DEVICE_METRICS_APPLIED window=${currentWindow.id} cssWidth=$targetCssWidth cssHeight=$targetCssHeight deviceScaleFactor=$scaleText mobile=false"
                     )
                     Log.i(
                         TAG,
-                        "DESKTOP_VIEWPORT_ZOOM_APPLIED window=${currentWindow.id} surfaceWidthPx=$surfaceWidthPx surfaceHeightPx=$surfaceHeightPx cssViewportWidth=$targetCssWidth cssViewportHeight=$targetCssHeight deviceScaleFactor=1.0 zoomFactor=$factorText zoomLevel=$levelText targetCssWidth=$targetCssWidth appliedAfterLoad=true"
+                        "DESKTOP_VIEWPORT_ZOOM_APPLIED window=${currentWindow.id} surfaceWidthPx=$surfaceWidthPx surfaceHeightPx=$surfaceHeightPx cssViewportWidth=$targetCssWidth cssViewportHeight=$targetCssHeight deviceScaleFactor=$scaleText zoomLevel=0.0000 targetCssWidth=$targetCssWidth appliedAfterLoad=true"
                     )
                 } else {
                     // Keep the existing zoom behavior as a safe fallback if this
