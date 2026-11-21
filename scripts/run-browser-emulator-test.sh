@@ -236,6 +236,10 @@ tap_accessibility_node_with_system_recovery desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 1 30
 wait_for_log "DESKTOP_VIEWPORT_FIT_APPLIED window=1" 1 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 2 120
+if ! dismiss_external_anr_dialog_if_present; then
+  echo "Could not safely dismiss an external system ANR before desktop-mode screenshot capture." >&2
+  exit 1
+fi
 DESKTOP_SCALE_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_VIEWPORT_FIT_APPLIED window=1" | tail -n1 || true)"
 if [[ ! "$DESKTOP_SCALE_LOG" =~ deviceScaleFactor=0\.[0-9]+ ]]; then
   echo "Expected desktop mode to fit the 1280px CSS viewport to the phone surface; got: $DESKTOP_SCALE_LOG" >&2
@@ -435,6 +439,10 @@ wait_for_log "DARK_APP_CHROME_ENABLED websiteColorsUntouched=true" 1 60
 wait_for_log "PAGE_BITMAP_CAPTURED url=https://example.com/" 1 60
 wait_for_log "TEST_RENDERER_CRASH_ARMED" 1 30
 sleep 1
+if ! dismiss_external_anr_dialog_if_present; then
+  echo "Could not safely dismiss an external system ANR before the pre-recovery screenshot." >&2
+  exit 1
+fi
 adb exec-out screencap -p > "$ARTIFACTS/page-before-renderer-restart.png"
 
 # Debug-only test: chrome://crash terminates the Chromium renderer. The app process
@@ -446,6 +454,10 @@ wait_for_log "CHROMIUM_RECOVERY_COMPLETED" 1 120
 wait_for_log "DARK_APP_CHROME_ENABLED websiteColorsUntouched=true" 2 60
 wait_for_log "PAGE_BITMAP_CAPTURED url=https://example.com/" 2 60
 sleep 1
+if ! dismiss_external_anr_dialog_if_present; then
+  echo "Could not safely dismiss an external system ANR before the post-recovery screenshot." >&2
+  exit 1
+fi
 adb exec-out screencap -p > "$ARTIFACTS/page-after-renderer-recovery.png"
 
 # Verify actual Chromium downloads and Android notifications using a trusted HTTPS origin.
