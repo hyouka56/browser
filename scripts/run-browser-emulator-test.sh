@@ -252,10 +252,12 @@ DESKTOP_DOM_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_DOM
 python3 - "$DESKTOP_DOM_LOG" <<'PY'
 import json, re, sys
 line = sys.argv[1]
-match = re.search(r"result=(\{.*\})$", line)
+match = re.search(r"result=(.*)$", line)
 if not match:
     raise SystemExit(f"Desktop DOM diagnostics did not return JSON: {line}")
 data = json.loads(match.group(1))
+if isinstance(data, str):
+    data = json.loads(data)
 body = data.get("bodyText", "")
 width = int(data.get("innerWidth", 0))
 client = int(data.get("clientWidth", 0))
