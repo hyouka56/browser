@@ -97,6 +97,7 @@ class MainActivity : AppCompatActivity() {
     private val downloadBrowserOwners = LinkedHashMap<Int, CefriumBrowser>()
     private val privateDownloadIds = mutableSetOf<Int>()
     private var activeWindowId = -1
+    private var desktopZoomCalibrationGeneration = 0
     private var nextWindowId = 1
     private var browserToCloseAfterDownload: CefriumBrowser? = null
 
@@ -497,7 +498,7 @@ class MainActivity : AppCompatActivity() {
                                         Log.i(TAG, "DESKTOP_DOM_DIAGNOSTICS window=$windowId result=${result.orEmpty()}")
                                     }
                                 }
-                            }, 1500L)
+                            }, 2500L)
                         }
                         if (intent.getBooleanExtra(EXTRA_TEST_OPEN_HTML_FILE, false) &&
                             isLocalHtmlDocument
@@ -1207,6 +1208,7 @@ class MainActivity : AppCompatActivity() {
             // Native page zoom widens the effective CSS viewport without replacing it.
             applyDesktopPageZoom(target)
         } else {
+            desktopZoomCalibrationGeneration++
             target.setUserAgentOverride(null)
             target.setZoomLevel(0.0)
         }
@@ -1224,20 +1226,79 @@ class MainActivity : AppCompatActivity() {
                 return@post
             }
 
-            // Android's native Surface keeps its real device scale factor. Zoom out
-            // until the effective CSS viewport is 1280px wide, instead of overriding
-            // the Surface's screen metrics to a virtual 1280x800 desktop display.
+            // Keep the Surface's real device metrics. Start with a native page zoom,
+            // then calibrate against Chromium's measured CSS viewport because Surface
+            // density, insets and platform scaling can differ from the nominal density.
+            val calibrationGeneration = ++desktopZoomCalibrationGeneration
+            val targetCssWidth = DESKTOP_VIEWPORT_WIDTH.toDouble()
             val viewportWidthDp = viewportWidthPx.toDouble() / density
-            val zoomFactor = (viewportWidthDp / DESKTOP_VIEWPORT_WIDTH.toDouble())
-                .coerceIn(0.1, 1.0)
-            val zoomLevel = kotlin.math.ln(zoomFactor) / kotlin.math.ln(1.2)
-            target.setZoomLevel(zoomLevel)
+            val zoomFactor = (viewportWidthDp / targetCssWidth).coerceIn(0.1, 1.0)
+            val initialZoomLevel = kotlin.math.ln(zoomFactor) / kotlin.math.ln(1.2)
+            target.setZoomLevel(initialZoomLevel)
             val factorText = String.format(Locale.ROOT, "%.4f", zoomFactor)
-            val levelText = String.format(Locale.ROOT, "%.4f", zoomLevel)
+            val levelText = String.format(Locale.ROOT, "%.4f", initialZoomLevel)
             Log.i(
                 TAG,
-                "DESKTOP_VIEWPORT_ZOOM_APPLIED window=${activeWindow.id} surfaceWidthPx=$viewportWidthPx density=$density viewportWidthDp=$viewportWidthDp zoomFactor=$factorText zoomLevel=$levelText"
+                "DESKTOP_VIEWPORT_ZOOM_APPLIED window=${activeWindow.id} surfaceWidthPx=$viewportWidthPx density=$density viewportWidthDp=$viewportWidthDp zoomFactor=$factorText zoomLevel=$levelText targetCssWidth=$targetCssWidth"
             )
+
+            fun isCurrentCalibration(): Boolean =
+                calibrationGeneration == desktopZoomCalibrationGeneration &&
+                    activeWindowId == activeWindow.id &&
+                    browser === target &&
+                    browserWindows.any { it.id == activeWindow.id && it.browser === target && it.desktopMode }
+
+            fun verifyAndCalibrate(attempt: Int, currentZoomLevel: Double) {
+                browserSlot.postDelayed({
+                    if (isCurrentCalibration()) {
+                        target.evaluateJavaScript("window.innerWidth") { result ->
+                            val measuredWidth = result.orEmpty().trim().trim('"').toDoubleOrNull()
+                            if (measuredWidth == null || measuredWidth <= 0.0) {
+                                Log.w(
+                                    TAG,
+                                    "DESKTOP_VIEWPORT_ZOOM_MEASURE_FAILED window=${activeWindow.id} attempt=$attempt result=${result.orEmpty()}"
+                                )
+                            } else {
+                                val errorRatio = measuredWidth / targetCssWidth
+                                if (kotlin.math.abs(errorRatio - 1.0) <= 0.02) {
+                                    val measuredText = String.format(Locale.ROOT, "%.2f", measuredWidth)
+                                    Log.i(
+                                        TAG,
+                                        "DESKTOP_VIEWPORT_ZOOM_CALIBRATED window=${activeWindow.id} cssWidth=$measuredText targetCssWidth=$targetCssWidth attempts=$attempt"
+                                    )
+                                } else if (attempt >= 2) {
+                                    val measuredText = String.format(Locale.ROOT, "%.2f", measuredWidth)
+                                    Log.w(
+                                        TAG,
+                                        "DESKTOP_VIEWPORT_ZOOM_CALIBRATION_INCOMPLETE window=${activeWindow.id} cssWidth=$measuredText targetCssWidth=$targetCssWidth attempts=$attempt"
+                                    )
+                                } else {
+                                    // CSS viewport width is inversely proportional to the
+                                    // native zoom factor (1.2^level). Correct from the
+                                    // measured value instead of assuming density is exact.
+                                    val correctionLevel = kotlin.math.ln(errorRatio) / kotlin.math.ln(1.2)
+                                    val correctedZoomLevel = (currentZoomLevel + correctionLevel).coerceIn(-10.0, 0.0)
+                                    browserSlot.post {
+                                        if (isCurrentCalibration()) {
+                                            target.setZoomLevel(correctedZoomLevel)
+                                            val measuredText = String.format(Locale.ROOT, "%.2f", measuredWidth)
+                                            val correctionText = String.format(Locale.ROOT, "%.4f", correctionLevel)
+                                            val correctedText = String.format(Locale.ROOT, "%.4f", correctedZoomLevel)
+                                            Log.i(
+                                                TAG,
+                                                "DESKTOP_VIEWPORT_ZOOM_CALIBRATION_APPLIED window=${activeWindow.id} measuredCssWidth=$measuredText targetCssWidth=$targetCssWidth correctionLevel=$correctionText zoomLevel=$correctedText attempt=${attempt + 1}"
+                                            )
+                                            verifyAndCalibrate(attempt + 1, correctedZoomLevel)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }, 450L)
+            }
+
+            verifyAndCalibrate(0, initialZoomLevel)
         }
     }
 

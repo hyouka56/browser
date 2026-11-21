@@ -235,6 +235,7 @@ wait_for_log "DESKTOP_SITE_INITIAL_STATE window=1 enabled=false" 1 30
 tap_accessibility_node_with_system_recovery desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 1 30
 wait_for_log "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" 1 30
+wait_for_log "DESKTOP_VIEWPORT_ZOOM_CALIBRATED window=1" 1 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 2 120
 wait_for_log "PAGE_BITMAP_CAPTURED url=https://example.com/" 2 90
 wait_for_log "DESKTOP_DOM_DIAGNOSTICS window=1" 1 30
@@ -262,10 +263,12 @@ body = data.get("bodyText", "")
 width = int(data.get("innerWidth", 0))
 client = int(data.get("clientWidth", 0))
 scroll = int(data.get("scrollWidth", 0))
-if "Example Domain" not in data.get("title", "") or "Example Domain" not in body:
+if "Example Domain" not in data.get("title", "") or "This domain is for use in documentation examples" not in body:
     raise SystemExit(f"Desktop page content is missing: {data}")
-if width < 1000 or client < 1000:
-    raise SystemExit(f"Desktop CSS viewport is not wide enough: {data}")
+if width < 1200 or client < 1200:
+    raise SystemExit(f"Desktop CSS viewport is not wide enough for the 1280px target: {data}")
+if width > 1360 or client > 1360:
+    raise SystemExit(f"Desktop CSS viewport was over-corrected: {data}")
 if scroll > client + 8:
     raise SystemExit(f"Desktop page still overflows horizontally: {data}")
 print(f"PASS: desktop DOM rendered at {width}px with no horizontal overflow")

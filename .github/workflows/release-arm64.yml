@@ -86,20 +86,20 @@ jobs:
               raise SystemExit(f"Expected only arm64-v8a, found {abis}")
           print(f"Verified native ABI: {abis}")
           PY
-          "$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$APK" | grep -F "package: name='com.search.browser' versionCode='18' versionName='1.0.17'"
+          "$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$APK" | grep -F "package: name='com.search.browser' versionCode='19' versionName='1.0.18'"
           # JDK 25 warns when apksigner's bundled Conscrypt provider loads native code
           # from the class path. Explicitly grant native access to unnamed modules.
           export JDK_JAVA_OPTIONS="--enable-native-access=ALL-UNNAMED"
           "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --verbose --print-certs "$APK" | tee release-signature.txt
           unset JDK_JAVA_OPTIONS
-          cp "$APK" Browser-1.0.17-ARM64-Release-Persistent-Signed.apk
+          cp "$APK" Browser-1.0.18-ARM64-Release-Persistent-Signed.apk
 
       - name: Upload persistently signed Release APK
         uses: actions/upload-artifact@v7
         with:
-          name: Browser-1.0.17-ARM64-Release-Persistent-Signed
+          name: Browser-1.0.18-ARM64-Release-Persistent-Signed
           path: |
-            Browser-1.0.17-ARM64-Release-Persistent-Signed.apk
+            Browser-1.0.18-ARM64-Release-Persistent-Signed.apk
             release-signature.txt
           if-no-files-found: error
           retention-days: 30
