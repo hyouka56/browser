@@ -29,7 +29,7 @@ adb wait-for-device
 # Match OPPO A73 (CPH2095) screen geometry for this Android 12 reproduction.
 # 408 dpi is a logical-density approximation, not a ColorOS firmware clone.
 adb shell wm size 1080x2400
-adb shell wm density 408
+adb shell wm density 440
 ACTUAL_API="$(adb shell getprop ro.build.version.sdk | tr -d '\r')"
 if [[ "$ACTUAL_API" != "$EXPECTED_API" ]]; then
   echo "Expected Android API $EXPECTED_API but emulator reports $ACTUAL_API" >&2
@@ -255,7 +255,7 @@ wait_for_log "DESKTOP_SITE_INITIAL_STATE window=1 enabled=false" 1 30
 wait_for_log "MOBILE_USER_AGENT_BASELINE_CAPTURED window=1" 1 30
 tap_accessibility_node_with_system_recovery desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 1 30
-wait_for_log "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" 1 30
+wait_for_log "DESKTOP_VIEWPORT_SCALE_APPLIED window=1" 1 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 2 120
 wait_for_log "PAGE_BITMAP_CAPTURED url=https://example.com/" 2 90
 wait_for_log "DESKTOP_DOM_DIAGNOSTICS window=1" 1 30
@@ -263,7 +263,7 @@ if ! dismiss_external_anr_dialog_if_present; then
   echo "Could not safely dismiss an external system ANR before desktop-mode screenshot capture." >&2
   exit 1
 fi
-DESKTOP_ZOOM_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" | tail -n1 || true)"
+DESKTOP_ZOOM_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_VIEWPORT_SCALE_APPLIED window=1" | tail -n1 || true)"
 if [[ ! "$DESKTOP_ZOOM_LOG" =~ targetCssWidth=1280 ]] || [[ ! "$DESKTOP_ZOOM_LOG" =~ appliedAfterLoad=true ]]; then
   echo "Expected native page zoom to be applied after navigation for a 1280 CSS-pixel desktop target; got: $DESKTOP_ZOOM_LOG" >&2
   adb logcat -d -s Browser:V >&2 || true
@@ -283,13 +283,16 @@ body = data.get("bodyText", "")
 width = int(data.get("innerWidth", 0))
 client = int(data.get("clientWidth", 0))
 scroll = int(data.get("scrollWidth", 0))
+dpr = float(data.get("devicePixelRatio", 0))
 if "Example Domain" not in data.get("title", "") or "This domain is for use in documentation examples" not in body:
     raise SystemExit(f"Desktop page content is missing: {data}")
 if width < 768 or client < 768:
     raise SystemExit(f"Desktop CSS viewport did not reach the wide layout breakpoint: {data}")
 if scroll > client + 8:
     raise SystemExit(f"Desktop page still overflows horizontally: {data}")
-print(f"PASS: desktop page content rendered at {width}px with no horizontal overflow after native zoom was applied")
+if abs(dpr - 1.0) > 0.02:
+    raise SystemExit(f"Desktop DPR must remain 1.0; physical fit must use the compositor image scale: {data}")
+print(f"PASS: desktop page content rendered at {width}px, DPR={dpr}, with no horizontal overflow after Chromium compositor scaling was applied")
 PY
 sleep 1
 adb exec-out screencap -p > "$ARTIFACTS/desktop-site-scaled.png"
@@ -346,7 +349,7 @@ printf 'PASS: Google search page loaded in mobile mode before the PC-mode test; 
 tap_accessibility_node_with_system_recovery desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 2 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 5 120
-wait_for_log "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" 2 45
+wait_for_log "DESKTOP_VIEWPORT_SCALE_APPLIED window=1" 2 45
 wait_for_log "DESKTOP_DOM_DIAGNOSTICS window=1" 2 45
 sleep 3
 if ! dismiss_external_anr_dialog_if_present; then
@@ -455,7 +458,7 @@ tap_accessibility_node_with_system_recovery desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 3 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 8 120
 wait_for_log "DESKTOP_DEVICE_METRICS_APPLIED window=1" 3 45
-wait_for_log "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" 3 45
+wait_for_log "DESKTOP_VIEWPORT_SCALE_APPLIED window=1" 3 45
 wait_for_log "DESKTOP_DOM_DIAGNOSTICS window=1" 3 45
 sleep 4
 if ! dismiss_external_anr_dialog_if_present; then
@@ -483,6 +486,7 @@ body_client = int(data.get("bodyClientWidth", 0))
 body_scroll = int(data.get("bodyScrollWidth", 0))
 body_rect = int(data.get("bodyRectWidth", 0))
 doc_rect = int(data.get("documentRectWidth", 0))
+dpr = float(data.get("devicePixelRatio", 0))
 if not title.strip() or not body.strip() or "github" not in title.lower() and "browser" not in title.lower():
     print(f"FAIL: GitHub repository page did not render in PC mode: {data}")
 else:
@@ -491,6 +495,10 @@ if not 1200 <= inner <= 1360 or not 1200 <= client <= 1360:
     print(f"FAIL: GitHub CSS viewport is not close to the requested 1280px: innerWidth={inner}, clientWidth={client}")
 else:
     print(f"PASS: GitHub CSS viewport is {inner}px, close to the requested 1280px.")
+if abs(dpr - 1.0) > 0.02:
+    print(f"FAIL: desktop DPR is not 1.0; image fit must be handled by compositor scale: {dpr}")
+else:
+    print(f"PASS: desktop DPR remains 1.0; physical image scaling is separate ({data.get('visualViewportScale')}).")
 # A full-width desktop layout must keep the repo's main content near the left edge.
 import xml.etree.ElementTree as ET
 ui_root = ET.parse(sys.argv[2]).getroot()
@@ -513,6 +521,22 @@ if overflow:
     print(f"FAIL: GitHub desktop layout extends beyond its viewport: inner={inner}, client={client}, docScroll={doc_scroll}, bodyClient={body_client}, bodyScroll={body_scroll}, bodyRect={body_rect}, documentRect={doc_rect}")
 else:
     print("PASS: GitHub desktop repository page has no horizontal document/body overflow.")
+probe = next((n for n in ui_root.iter("node") if
+              "PC viewport fit probe" in n.attrib.get("content-desc", "") or
+              "PC viewport fit probe" in n.attrib.get("text", "")), None)
+if probe is None:
+    print("FAIL: the fixed right-edge PC viewport probe is not visible in the Android screen hierarchy.")
+else:
+    probe_bounds = re.search(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", probe.attrib.get("bounds", ""))
+    if not probe_bounds:
+        print("FAIL: the right-edge PC viewport probe has no measurable physical screen bounds.")
+    else:
+        probe_left, probe_right = int(probe_bounds.group(1)), int(probe_bounds.group(3))
+        print(f"PC viewport fit probe physical bounds: left={probe_left}px right={probe_right}px screenWidth=1080px.")
+        if probe_right < 1060 or probe_right > 1080 or probe_left < 1000:
+            print("FAIL: the page's right edge is not scaled into the full 1080px physical screen.")
+        else:
+            print("PASS: the rightmost desktop page marker is visible at the physical right edge of the 1080px screen.")
 PY
 if [[ ! -s "$ARTIFACTS/github-desktop-repository.png" ]] || [[ "$(wc -c < "$ARTIFACTS/github-desktop-repository.png")" -le 10000 ]]; then
   echo "GitHub PC-mode screenshot was not captured correctly." >&2
@@ -1034,7 +1058,7 @@ report = {
         "cefrium_chromium_engine_logged": "CEF_ENGINE version=0.21.0 chromium=156.0.8078.96" in log,
         "page_title_verified": "PAGE_TITLE window=1 title=Example Domain" in log,
         "page_load_completed": "PAGE_LOAD_STATE loading=false" in log,
-        "desktop_page_content_rendered_without_horizontal_overflow": "PASS: desktop page content rendered at" in desktop_site_results and "with no horizontal overflow after native zoom was applied" in desktop_site_results,
+        "desktop_page_content_rendered_without_horizontal_overflow": "PASS: desktop page content rendered at" in desktop_site_results and "with no horizontal overflow after Chromium compositor scaling was applied" in desktop_site_results,
         "mobile_css_viewport_restored_after_disabling_desktop_mode": "PASS: mobile CSS viewport restored to" in desktop_site_results,
         "mobile_user_agent_restored_after_disabling_desktop_mode": "PASS: Android mobile user-agent, Android navigator.platform, and mobile UA metadata restored after disabling PC mode" in desktop_site_results,
         "google_desktop_search_page_rendered_in_pc_mode": (
@@ -1066,6 +1090,12 @@ report = {
         "github_desktop_css_viewport_is_near_1280px": (
             "PASS: GitHub CSS viewport is" in desktop_site_results and
             "close to the requested 1280px" in desktop_site_results
+        ),
+        "desktop_device_pixel_ratio_is_one": (
+            "PASS: desktop DPR remains 1.0" in desktop_site_results
+        ),
+        "github_right_edge_is_visible_on_physical_screen": (
+            "PASS: the rightmost desktop page marker is visible at the physical right edge" in desktop_site_results
         ),
         "github_main_content_starts_near_left_edge": (
             "PASS: GitHub main content begins near the left edge" in desktop_site_results
@@ -1116,39 +1146,4 @@ report = {
         "activity_close_deferred_for_download": "BROWSER_CLOSE_DEFERRED_FOR_DOWNLOAD" in log,
         "browser_task_removed_during_download": "DOWNLOAD_KEEP_ALIVE_TASK_REMOVED" in log,
         "background_download_finished_after_task_removal": "DOWNLOAD_FILE_SAVED name=download-background-test.txt" in log and (folder / "background-download-after-task-removal.txt").is_file(),
-        "foreground_service_stopped_after_download": "DOWNLOAD_KEEP_ALIVE_SERVICE_STOPPED" in log,
-        "browser_closed_after_download": "BROWSER_CLOSED_AFTER_DOWNLOAD" in log,
-        "easylist_loaded_with_positive_rule_count": (
-            field_int(enabled_default, "EasyListRules") > 0 and
-            field_int(disabled_persisted, "EasyListRules") > 0 and
-            field_int(enabled_restored, "EasyListRules") > 0
-        ),
-        "known_ad_request_blocked_when_enabled": (
-            field_int(enabled_default, "blockedRequests") > 0 and
-            "allowedSameOrigin=true" in enabled_default
-        ),
-        "normal_same_origin_request_remains_allowed": (
-            "allowedSameOrigin=true" in enabled_default and
-            "allowedSameOrigin=true" in disabled_persisted and
-            "allowedSameOrigin=true" in enabled_restored
-        ),
-        "disabled_ad_block_state_persists_and_does_not_block": (
-            field_int(disabled_persisted, "blockedRequests") == 0
-        ),
-        "ad_blocking_restored_after_reenable": (
-            field_int(enabled_restored, "blockedRequests") > 0
-        ),
-        "shield_toggle_updates_every_open_window": (
-            "PASS: shield toggle updated both open browser windows." in adblock_result_lines
-        ),
-    },
-}
-report["result"] = "PASS" if all(report["checks"].values()) else "FAIL"
-(folder / "report.json").write_text(json.dumps(report, indent=2) + "\n")
-print(json.dumps(report, indent=2))
-if report["result"] != "PASS":
-    raise SystemExit(1)
-PY
-
-echo "PASS: API $EXPECTED_API rendered Example Domain with native website colors and dark app chrome, recovered Chromium, and completed download checks." | tee "$ARTIFACTS/result.txt"
-echo "PASS: API $EXPECTED_API - readable dark app chrome, unchanged website colors, Chromium recovery, downloads, notifications, and background download continuation." >> "$GITHUB_STEP_SUMMARY"
+       

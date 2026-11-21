@@ -472,7 +472,7 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                     if (isActiveWindow && window.desktopMode && isSupportedWebUrl(pageUrl)) {
-                        applyDesktopPageZoom(instance)
+                        applyDesktopViewportScale(instance)
                     }
                     val isLocalHtmlNavigation = window.localHtmlDisplayName != null &&
                         (pageUrl == "about:blank" || pageUrl.startsWith("data:"))
@@ -498,18 +498,35 @@ class MainActivity : AppCompatActivity() {
                                 if (isActiveBrowserForDiagnostics(windowId, instance, expectedDesktopMode = true)) {
                                     runCatching {
                                         instance.evaluateJavaScript(
-                                            """JSON.stringify({
-                                                readyState: document.readyState,
-                                                title: document.title || "",
-                                                bodyText: (document.body?.innerText || "").trim().slice(0, 240),
-                                                innerWidth: window.innerWidth,
-                                                screenWidth: screen.width,
-                                                devicePixelRatio: window.devicePixelRatio,
-                                                clientWidth: document.documentElement?.clientWidth || 0,
-                                                scrollWidth: document.documentElement?.scrollWidth || 0,
-                                                visualViewportWidth: Math.round(window.visualViewport?.width || 0),
-                                                screenHeight: screen.height
-                                            })"""
+                                            """(() => {
+                                                const probeId = "__browser_pc_viewport_fit_probe";
+                                                if (!document.getElementById(probeId) && document.documentElement) {
+                                                    const probe = document.createElement("button");
+                                                    probe.id = probeId;
+                                                    probe.type = "button";
+                                                    probe.setAttribute("aria-label", "PC viewport fit probe");
+                                                    probe.style.cssText = "position:fixed;right:0;top:180px;width:16px;height:90px;padding:0;border:0;border-radius:0;background:#ff00ff;z-index:2147483647;pointer-events:auto;";
+                                                    document.documentElement.appendChild(probe);
+                                                }
+                                                return JSON.stringify({
+                                                    readyState: document.readyState,
+                                                    title: document.title || "",
+                                                    bodyText: (document.body?.innerText || "").trim().slice(0, 240),
+                                                    innerWidth: window.innerWidth,
+                                                    outerWidth: window.outerWidth,
+                                                    screenWidth: screen.width,
+                                                    screenHeight: screen.height,
+                                                    devicePixelRatio: window.devicePixelRatio,
+                                                    clientWidth: document.documentElement?.clientWidth || 0,
+                                                    scrollWidth: document.documentElement?.scrollWidth || 0,
+                                                    bodyClientWidth: document.body?.clientWidth || 0,
+                                                    bodyScrollWidth: document.body?.scrollWidth || 0,
+                                                    bodyRectWidth: Math.round(document.body?.getBoundingClientRect().width || 0),
+                                                    documentRectWidth: Math.round(document.documentElement?.getBoundingClientRect().width || 0),
+                                                    visualViewportWidth: Math.round(window.visualViewport?.width || 0),
+                                                    visualViewportScale: window.visualViewport?.scale || 0
+                                                });
+                                            })()"""
                                         ) { result ->
                                             Log.i(TAG, "DESKTOP_DOM_DIAGNOSTICS window=$windowId result=${result.orEmpty()}")
                                         }
@@ -1330,7 +1347,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun applyDesktopPageZoom(target: CefriumBrowser) {
+    private fun applyDesktopViewportScale(target: CefriumBrowser) {
         fun applyWhenSurfaceIsReady(attempt: Int) {
             val activeWindow = browserWindows.firstOrNull {
                 it.id == activeWindowId && it.browser === target && it.desktopMode
@@ -1343,30 +1360,30 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     Log.w(
                         TAG,
-                        "DESKTOP_VIEWPORT_ZOOM_SKIPPED window=${activeWindow.id} widthPx=$surfaceWidthPx heightPx=$surfaceHeightPx"
+                        "DESKTOP_VIEWPORT_SCALE_SKIPPED window=${activeWindow.id} widthPx=$surfaceWidthPx heightPx=$surfaceHeightPx"
                     )
                 }
                 return
             }
 
-            // A page zoom cannot select the page's CSS layout width. Ask Chromium
-            // for a real desktop viewport, then scale that desktop canvas into the
-            // measured Android surface. The DPR is 1 to emulate an ordinary desktop.
+            // Keep the website's desktop layout in ordinary CSS pixels at DPR 1.
+            // deviceScaleFactor controls CSS/device density; it is NOT the output
+            // image fit factor. Chromium exposes a separate `scale` transform that
+            // fits the resulting desktop view into the actual Android surface.
             val targetCssWidth = DESKTOP_VIEWPORT_WIDTH
             val targetCssHeight = Math.round(
                 targetCssWidth.toDouble() * surfaceHeightPx.toDouble() / surfaceWidthPx.toDouble()
             ).toInt().coerceAtLeast(1)
-            // Map the full CSS desktop viewport onto the physical Android surface
-            // through DPR, not page zoom. Page zoom changes layout breakpoints and
-            // can move GitHub's main column off the visible left side.
-            val surfaceScale = (surfaceWidthPx.toDouble() / targetCssWidth.toDouble())
+            val renderScale = (surfaceWidthPx.toDouble() / targetCssWidth.toDouble())
                 .coerceIn(0.1, 1.0)
+            val desktopDeviceScaleFactor = 1.0
             val deviceMetrics = JSONObject()
                 .put("width", targetCssWidth)
                 .put("height", targetCssHeight)
                 .put("screenWidth", targetCssWidth)
                 .put("screenHeight", targetCssHeight)
-                .put("deviceScaleFactor", surfaceScale)
+                .put("deviceScaleFactor", desktopDeviceScaleFactor)
+                .put("scale", renderScale)
                 .put("mobile", false)
 
             target.executeDevToolsMethod(
@@ -1376,35 +1393,31 @@ class MainActivity : AppCompatActivity() {
                 val currentWindow = browserWindows.firstOrNull {
                     it.id == activeWindowId && it.browser === target && it.desktopMode
                 } ?: return@executeDevToolsMethod
+                target.setZoomLevel(0.0)
                 if (success) {
-                    // Explicitly neutralize any previous page zoom; DPR performs the fit.
-                    target.setZoomLevel(0.0)
-                    val scaleText = String.format(Locale.ROOT, "%.4f", surfaceScale)
+                    val scaleText = String.format(Locale.ROOT, "%.4f", renderScale)
                     Log.i(
                         TAG,
-                        "DESKTOP_DEVICE_METRICS_APPLIED window=${currentWindow.id} cssWidth=$targetCssWidth cssHeight=$targetCssHeight deviceScaleFactor=$scaleText mobile=false"
+                        "DESKTOP_DEVICE_METRICS_APPLIED window=${currentWindow.id} cssWidth=$targetCssWidth cssHeight=$targetCssHeight deviceScaleFactor=1.0000 renderScale=$scaleText mobile=false"
                     )
                     Log.i(
                         TAG,
-                        "DESKTOP_VIEWPORT_ZOOM_APPLIED window=${currentWindow.id} surfaceWidthPx=$surfaceWidthPx surfaceHeightPx=$surfaceHeightPx cssViewportWidth=$targetCssWidth cssViewportHeight=$targetCssHeight deviceScaleFactor=$scaleText zoomLevel=0.0000 targetCssWidth=$targetCssWidth appliedAfterLoad=true"
+                        "DESKTOP_VIEWPORT_SCALE_APPLIED window=${currentWindow.id} surfaceWidthPx=$surfaceWidthPx surfaceHeightPx=$surfaceHeightPx cssViewportWidth=$targetCssWidth cssViewportHeight=$targetCssHeight deviceScaleFactor=1.0000 renderScale=$scaleText zoomLevel=0.0000 appliedAfterLoad=true"
                     )
                 } else {
-                    // Keep the existing zoom behavior as a safe fallback if this
-                    // Chromium build refuses the device-metrics command.
-                    val density = resources.displayMetrics.density.toDouble().coerceAtLeast(0.1)
-                    val viewportWidthDp = surfaceWidthPx.toDouble() / density
-                    val fallbackFactor = (viewportWidthDp / targetCssWidth.toDouble()).coerceIn(0.1, 1.0)
-                    val fallbackLevel = (kotlin.math.ln(fallbackFactor) / kotlin.math.ln(1.2))
-                        .coerceIn(-10.0, 0.0)
-                    target.setZoomLevel(fallbackLevel)
+                    // Do not fall back to page zoom: it changes layout breakpoints
+                    // and was the source of the earlier shifted/cropped GitHub view.
                     Log.e(
                         TAG,
-                        "DESKTOP_DEVICE_METRICS_FAILED window=${currentWindow.id} result=$resultJson; using legacy page zoom"
+                        "DESKTOP_DEVICE_METRICS_FAILED window=${currentWindow.id} result=$resultJson; no page-zoom fallback applied"
                     )
-                    Log.i(
-                        TAG,
-                        "DESKTOP_VIEWPORT_ZOOM_APPLIED window=${currentWindow.id} surfaceWidthPx=$surfaceWidthPx surfaceHeightPx=$surfaceHeightPx density=$density viewportWidthDp=$viewportWidthDp zoomFactor=$fallbackFactor zoomLevel=$fallbackLevel targetCssWidth=$targetCssWidth appliedAfterLoad=true fallback=true"
-                    )
+                    runOnUiThread {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "PC mode could not fit this page on the screen",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
                 }
             }
         }
@@ -2952,19 +2965,4 @@ class MainActivity : AppCompatActivity() {
         const val KEY_LAST_URL = "last_successful_url"
         const val KEY_DESKTOP_SITE = "desktop_site_enabled"
         const val DESKTOP_VIEWPORT_WIDTH = 1280
-        const val DESKTOP_CHROME_MAJOR = "156"
-        const val DESKTOP_CHROME_VERSION = "156.0.8078.96"
-        const val DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.8078.96 Safari/537.36"
-        const val KEY_NOTIFICATION_PERMISSION_ASKED = "download_notification_permission_asked"
-        const val EXTRA_TEST_URL = "com.search.browser.TEST_URL"
-        const val EXTRA_TEST_DOWNLOAD_PAGE = "com.search.browser.TEST_DOWNLOAD_PAGE"
-        const val EXTRA_SHOW_DOWNLOADS = "com.search.browser.SHOW_DOWNLOADS"
-        const val EXTRA_TEST_CRASH_RENDERER = "com.search.browser.TEST_CRASH_RENDERER"
-        const val EXTRA_TEST_ADBLOCK_PAGE = "com.search.browser.TEST_ADBLOCK_PAGE"
-        const val EXTRA_TEST_ADBLOCK_MULTIWINDOW = "com.search.browser.TEST_ADBLOCK_MULTIWINDOW"
-        const val EXTRA_TEST_OPEN_HTML_FILE = "com.search.browser.TEST_OPEN_HTML_FILE"
-        const val BACKGROUND_DOWNLOAD_TEST_FILE = "download-background-test.txt"
-        const val BACKGROUND_DOWNLOAD_TEST_DELAY_MS = 8_000L
-        const val TAG = "Browser"
-    }
-}
+        const val DESKTOP_CHROME_MAJ
