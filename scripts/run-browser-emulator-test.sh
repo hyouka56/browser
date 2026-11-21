@@ -304,13 +304,14 @@ print("PASS: Android mobile user-agent, Android navigator.platform, and mobile U
 PY
 # Verify the restored mobile identity against a real Google search page, then retain its screenshot.
 GOOGLE_SEARCH_URL="https://www.google.com/search?q=hi"
-tap_accessibility_node_with_system_recovery text "https://example.com/"
-adb shell input text "$GOOGLE_SEARCH_URL"
-adb shell input keyevent KEYCODE_ENTER
+# Reuse the current tab through MainActivity.onNewIntent instead of typing into the app address field.
+adb shell am start --activity-single-top -W -n "$ACTIVITY" -a android.intent.action.VIEW -d "$GOOGLE_SEARCH_URL" 2>&1 | tee "$ARTIFACTS/google-mobile-search-launch.txt"
 wait_for_log "PAGE_LOAD_STATE loading=false" 4 120
 wait_for_log "MOBILE_USER_AGENT_DIAGNOSTICS window=1" 2 45
 sleep 3
 adb exec-out screencap -p > "$ARTIFACTS/google-mobile-search.png"
+adb shell uiautomator dump /sdcard/google-mobile-search.xml >/dev/null 2>&1
+adb exec-out cat /sdcard/google-mobile-search.xml > "$ARTIFACTS/google-mobile-search-ui.xml"
 if [[ ! -s "$ARTIFACTS/google-mobile-search.png" ]]; then
   echo "Google mobile search screenshot was not captured." >&2
   exit 1
@@ -825,6 +826,7 @@ report = {
         "google_mobile_search_page_rendered_after_desktop_restore": (
             "PASS: Google search page loaded after returning from PC mode; mobile screenshot captured." in desktop_site_results and
             (folder / "google-mobile-search.png").is_file() and
+            (folder / "google-mobile-search-ui.xml").is_file() and
             (folder / "google-mobile-search.png").stat().st_size > 10000
         ),
         "desktop_site_toggle_returns_to_mobile_mode": "PASS: PC control switched desktop mode on and back to mobile mode." in desktop_site_results,
