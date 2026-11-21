@@ -76,7 +76,8 @@ class MainActivity : AppCompatActivity() {
         var browser: CefriumBrowser,
         var title: String,
         var url: String,
-        val incognito: Boolean
+        val incognito: Boolean,
+        var desktopMode: Boolean = false
     )
 
     private lateinit var browser: CefriumBrowser
@@ -90,6 +91,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var shieldButton: ImageButton
     private lateinit var rendererErrorPanel: FrameLayout
     private lateinit var defaultBrowserButton: TextView
+    private lateinit var desktopSiteButton: TextView
     private lateinit var windowsButton: TextView
 
     private val browserWindows = mutableListOf<BrowserWindow>()
@@ -218,7 +220,8 @@ class MainActivity : AppCompatActivity() {
         replaceWindowId: Int? = null,
         existingBrowser: CefriumBrowser? = null,
         loadInitialUrl: Boolean = true,
-        previousBrowserAlreadyClosed: Boolean = false
+        previousBrowserAlreadyClosed: Boolean = false,
+        desktopMode: Boolean? = null
     ) {
         val previousWindow = browserWindows.firstOrNull { it.id == activeWindowId }
         if (!previousBrowserAlreadyClosed && previousWindow != null && previousWindow.browser !== existingBrowser) {
@@ -237,11 +240,18 @@ class MainActivity : AppCompatActivity() {
         instance.setPullToRefreshEnabled(!BuildConfig.TV_LITE)
         Log.i(TAG, "PULL_TO_REFRESH_CONFIG native=${!BuildConfig.TV_LITE}")
         val windowId = replaceWindowId ?: nextWindowId++
-        val window = browserWindows.firstOrNull { it.id == windowId }?.also {
+        val existingWindow = browserWindows.firstOrNull { it.id == windowId }
+        val initialDesktopMode = desktopMode
+            ?: existingWindow?.desktopMode
+            ?: preferences.getBoolean(KEY_DESKTOP_SITE, false)
+        val window = existingWindow?.also {
             it.browser = instance
             it.title = "New tab"
             it.url = displayUrl
-        } ?: BrowserWindow(windowId, instance, "New tab", displayUrl, incognito).also {
+            it.desktopMode = initialDesktopMode
+        } ?: BrowserWindow(
+            windowId, instance, "New tab", displayUrl, incognito, initialDesktopMode
+        ).also {
             browserWindows.add(it)
         }
         activeWindowId = windowId
@@ -251,9 +261,11 @@ class MainActivity : AppCompatActivity() {
         searchField.setText(displayUrl)
         browserSlot.removeAllViews()
         updateWindowsButton()
+        updateDesktopSiteButton()
         // Darken app chrome only. Keep each website in its own color scheme; never inject page recoloring.
         instance.setBackgroundColor(Color.WHITE)
         instance.setDarkMode(false)
+        applyDesktopSiteSettings(instance, window.desktopMode)
         Log.i(TAG, "DARK_APP_CHROME_ENABLED websiteColorsUntouched=true")
         instance.setPageVisible(true)
         instance.setFocus(true)
@@ -408,8 +420,9 @@ class MainActivity : AppCompatActivity() {
                 if (activeWindowId == windowId) {
                     lastRequestedUrl = url
                     runOnUiThread {
-                        if (activeWindowId == windowId && !searchField.hasFocus()) {
-                            searchField.setText(url)
+                        if (activeWindowId == windowId) {
+                            if (!searchField.hasFocus()) searchField.setText(url)
+                            updateDesktopSiteButton()
                         }
                     }
                 }
@@ -430,6 +443,7 @@ class MainActivity : AppCompatActivity() {
                     val isActiveWindow = activeWindowId == windowId
                     if (isActiveWindow) {
                         updateShieldButton()
+                        updateDesktopSiteButton()
                     }
                     Log.i(TAG, "AD_BLOCK_PAGE_STATS window=$windowId enabled=$adBlockingEnabled blockedRequests=${instance.getBlockedCount()}")
                     val pageUrl = instance.getUrl().orEmpty().ifBlank { window.url }
@@ -521,7 +535,8 @@ class MainActivity : AppCompatActivity() {
                     popupUrl,
                     incognito = window.incognito,
                     existingBrowser = popup,
-                    loadInitialUrl = false
+                    loadInitialUrl = false,
+                    desktopMode = window.desktopMode
                 )
                 Log.i(TAG, "POPUP_TAB_OPENED parent=$windowId userGesture=$userGesture incognito=${window.incognito}")
                 return true
@@ -954,7 +969,7 @@ class MainActivity : AppCompatActivity() {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(9), dp(12), dp(10))
+            setPadding(dp(8), dp(9), dp(8), dp(10))
             setBackgroundColor(COLOR_APP_BACKGROUND)
         }
 
@@ -999,8 +1014,8 @@ class MainActivity : AppCompatActivity() {
             toggleAdBlocking()
         }
         if (BuildConfig.TV_LITE) shieldButton.visibility = View.GONE
-        bar.addView(shieldButton, LinearLayout.LayoutParams(dp(48), dp(54)).apply {
-            marginStart = dp(8)
+        bar.addView(shieldButton, LinearLayout.LayoutParams(dp(44), dp(54)).apply {
+            marginStart = dp(4)
         })
 
         val downloadsButton = createIconButton(
@@ -1010,8 +1025,18 @@ class MainActivity : AppCompatActivity() {
         ) {
             toggleDownloads()
         }
-        bar.addView(downloadsButton, LinearLayout.LayoutParams(dp(48), dp(54)).apply {
-            marginStart = dp(8)
+        bar.addView(downloadsButton, LinearLayout.LayoutParams(dp(44), dp(54)).apply {
+            marginStart = dp(4)
+        })
+
+        desktopSiteButton = textView("PC", 12f, COLOR_TEXT_PRIMARY, bold = true).apply {
+            gravity = Gravity.CENTER
+            contentDescription = "Show desktop site"
+            background = roundedBackground(COLOR_SURFACE, dp(14))
+            setOnClickListener { toggleDesktopSite() }
+        }
+        bar.addView(desktopSiteButton, LinearLayout.LayoutParams(dp(36), dp(54)).apply {
+            marginStart = dp(4)
         })
 
         windowsButton = textView("1", 16f, COLOR_TEXT_PRIMARY, bold = true).apply {
@@ -1020,29 +1045,27 @@ class MainActivity : AppCompatActivity() {
             background = roundedBackground(COLOR_SURFACE, dp(15))
             setOnClickListener { showWindowsDialog() }
         }
-        bar.addView(windowsButton, LinearLayout.LayoutParams(dp(46), dp(54)).apply {
-            marginStart = dp(6)
+        bar.addView(windowsButton, LinearLayout.LayoutParams(dp(40), dp(54)).apply {
+            marginStart = dp(4)
         })
 
         defaultBrowserButton = textView("⋮", 26f, COLOR_TEXT_PRIMARY, bold = true).apply {
             gravity = Gravity.CENTER
             contentDescription = "Browser options"
-            visibility = if (isDefaultBrowser()) View.GONE else View.VISIBLE
             setOnClickListener { anchor ->
-                if (isDefaultBrowser()) {
-                    updateDefaultBrowserButton()
-                } else {
-                    PopupMenu(this@MainActivity, anchor).apply {
-                        menu.add("Set as default browser")
-                        setOnMenuItemClickListener {
-                            requestDefaultBrowserRole()
-                            true
-                        }
-                    }.show()
-                }
+                PopupMenu(this@MainActivity, anchor).apply {
+                    menu.add("Set as default browser")
+                    if (isDefaultBrowser()) {
+                        menu.add("Browser is currently the default").isEnabled = false
+                    }
+                    setOnMenuItemClickListener {
+                        requestDefaultBrowserRole()
+                        true
+                    }
+                }.show()
             }
         }
-        bar.addView(defaultBrowserButton, LinearLayout.LayoutParams(dp(40), dp(54)).apply {
+        bar.addView(defaultBrowserButton, LinearLayout.LayoutParams(dp(36), dp(54)).apply {
             marginStart = dp(2)
         })
         return bar
@@ -1076,6 +1099,103 @@ class MainActivity : AppCompatActivity() {
             "${browserWindows.size} windows, incognito active"
         } else {
             "${browserWindows.size} windows"
+        }
+    }
+
+    private fun updateDesktopSiteButton() {
+        if (!::desktopSiteButton.isInitialized) return
+        val activeWindow = browserWindows.firstOrNull { it.id == activeWindowId }
+        val enabled = activeWindow?.desktopMode == true
+        val supported = activeWindow != null && (
+            isSupportedWebUrl(activeWindow.browser.getUrl()) || isSupportedWebUrl(activeWindow.url)
+        )
+        desktopSiteButton.isEnabled = supported
+        desktopSiteButton.alpha = if (supported) 1f else 0.45f
+        desktopSiteButton.setTextColor(if (enabled) COLOR_ACCENT else COLOR_TEXT_PRIMARY)
+        desktopSiteButton.background = roundedBackground(
+            if (enabled) COLOR_ACCENT_SURFACE else COLOR_SURFACE,
+            dp(14)
+        )
+        desktopSiteButton.contentDescription = if (enabled) {
+            "Desktop site enabled. Tap to use mobile site"
+        } else {
+            "Show desktop site"
+        }
+    }
+
+    private fun toggleDesktopSite() {
+        val activeWindow = browserWindows.firstOrNull { it.id == activeWindowId } ?: return
+        val currentUrl = activeWindow.browser.getUrl()?.takeIf(::isSupportedWebUrl)
+            ?: activeWindow.url.takeIf(::isSupportedWebUrl)
+        if (currentUrl == null) {
+            Toast.makeText(this, "Desktop mode is available for websites only", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val enabled = !activeWindow.desktopMode
+        activeWindow.desktopMode = enabled
+        if (!activeWindow.incognito) {
+            preferences.edit().putBoolean(KEY_DESKTOP_SITE, enabled).apply()
+        }
+        applyDesktopSiteSettings(activeWindow.browser, enabled)
+        activeWindow.url = currentUrl
+        lastRequestedUrl = currentUrl
+        searchField.setText(currentUrl)
+        updateDesktopSiteButton()
+        activeWindow.browser.loadUrl(currentUrl)
+        Toast.makeText(
+            this,
+            if (enabled) "Desktop site enabled" else "Mobile site enabled",
+            Toast.LENGTH_SHORT
+        ).show()
+        Log.i(TAG, "DESKTOP_SITE_MODE window=${activeWindow.id} enabled=$enabled url=$currentUrl")
+    }
+
+    private fun applyDesktopSiteSettings(target: CefriumBrowser, enabled: Boolean) {
+        if (enabled) {
+            target.setUserAgentOverride(DESKTOP_USER_AGENT)
+            val brandVersions = JSONArray()
+                .put(JSONObject().put("brand", "Chromium").put("version", DESKTOP_CHROME_MAJOR))
+            val fullBrandVersions = JSONArray()
+                .put(JSONObject().put("brand", "Chromium").put("version", DESKTOP_CHROME_VERSION))
+            val userAgentMetadata = JSONObject()
+                .put("brands", brandVersions)
+                .put("fullVersionList", fullBrandVersions)
+                .put("platform", "Windows")
+                .put("platformVersion", "10.0.0")
+                .put("architecture", "x86")
+                .put("model", "")
+                .put("mobile", false)
+                .put("bitness", "64")
+                .put("wow64", false)
+            val userAgentParams = JSONObject()
+                .put("userAgent", DESKTOP_USER_AGENT)
+                .put("platform", "Win32")
+                .put("userAgentMetadata", userAgentMetadata)
+            target.executeDevToolsMethod(
+                "Emulation.setUserAgentOverride",
+                userAgentParams.toString(),
+                null
+            )
+            val metrics = JSONObject()
+                .put("width", DESKTOP_VIEWPORT_WIDTH)
+                .put("height", DESKTOP_VIEWPORT_HEIGHT)
+                .put("screenWidth", DESKTOP_VIEWPORT_WIDTH)
+                .put("screenHeight", DESKTOP_VIEWPORT_HEIGHT)
+                .put("deviceScaleFactor", 1.0)
+                .put("mobile", false)
+            target.executeDevToolsMethod(
+                "Emulation.setDeviceMetricsOverride",
+                metrics.toString(),
+                null
+            )
+        } else {
+            target.setUserAgentOverride(null)
+            target.executeDevToolsMethod(
+                "Emulation.clearDeviceMetricsOverride",
+                "{}",
+                null
+            )
         }
     }
 
@@ -1268,6 +1388,7 @@ class MainActivity : AppCompatActivity() {
         showBrowser()
         updateWindowsButton()
         updateShieldButton()
+        updateDesktopSiteButton()
     }
 
     private fun closeWindow(windowId: Int, closeBrowser: Boolean = true) {
@@ -1453,8 +1574,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateDefaultBrowserButton() {
         if (!::defaultBrowserButton.isInitialized) return
-        defaultBrowserButton.visibility = if (isDefaultBrowser()) View.GONE else View.VISIBLE
-        defaultBrowserButton.contentDescription = "Browser options"
+        defaultBrowserButton.visibility = View.VISIBLE
+        defaultBrowserButton.contentDescription = if (isDefaultBrowser()) {
+            "Browser options. Browser is the default browser"
+        } else {
+            "Browser options. Set Browser as the default browser"
+        }
     }
 
     private fun requestDefaultBrowserRole() {
@@ -1464,17 +1589,31 @@ class MainActivity : AppCompatActivity() {
                 if (roleManager.isRoleHeld(RoleManager.ROLE_BROWSER)) {
                     Toast.makeText(this, "Browser is already the default", Toast.LENGTH_SHORT).show()
                 } else {
-                    browserRoleLauncher.launch(
-                        roleManager.createRequestRoleIntent(RoleManager.ROLE_BROWSER)
-                    )
+                    runCatching {
+                        browserRoleLauncher.launch(
+                            roleManager.createRequestRoleIntent(RoleManager.ROLE_BROWSER)
+                        )
+                    }.onFailure { error ->
+                        Log.e(TAG, "Unable to open the browser-role request", error)
+                        openDefaultAppsSettings()
+                    }
                 }
                 return
             }
         }
+        openDefaultAppsSettings()
+    }
+
+    private fun openDefaultAppsSettings() {
         runCatching {
             startActivity(Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS))
-        }.onFailure {
-            Toast.makeText(this, "Open Android default apps settings to choose Browser", Toast.LENGTH_LONG).show()
+        }.onFailure { error ->
+            Log.e(TAG, "Unable to open Android default-app settings", error)
+            Toast.makeText(
+                this,
+                "Open Android default apps settings to choose Browser",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 
@@ -2569,6 +2708,12 @@ class MainActivity : AppCompatActivity() {
         const val KEY_DOWNLOADS = "downloads_json"
         const val KEY_BROWSER_STATE = "browser_state"
         const val KEY_LAST_URL = "last_successful_url"
+        const val KEY_DESKTOP_SITE = "desktop_site_enabled"
+        const val DESKTOP_VIEWPORT_WIDTH = 1280
+        const val DESKTOP_VIEWPORT_HEIGHT = 800
+        const val DESKTOP_CHROME_MAJOR = "156"
+        const val DESKTOP_CHROME_VERSION = "156.0.8078.96"
+        const val DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.8078.96 Safari/537.36"
         const val KEY_NOTIFICATION_PERMISSION_ASKED = "download_notification_permission_asked"
         const val EXTRA_TEST_URL = "com.search.browser.TEST_URL"
         const val EXTRA_TEST_DOWNLOAD_PAGE = "com.search.browser.TEST_DOWNLOAD_PAGE"

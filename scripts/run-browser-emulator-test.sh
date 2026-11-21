@@ -57,6 +57,23 @@ for html_mime in text/html application/xhtml+xml; do
 done
 echo "PASS: Android Open with resolver includes Browser for HTML and XHTML files." | tee "$ARTIFACTS/open-with-results.txt"
 
+# Verify Browser is an eligible HTTP and HTTPS handler for Android's browser role.
+for web_scheme in http https; do
+  resolver_output="$(adb shell cmd package query-activities --brief \
+    -a android.intent.action.VIEW \
+    -c android.intent.category.DEFAULT \
+    -c android.intent.category.BROWSABLE \
+    -d "${web_scheme}://example.com/" \
+    -p "$PACKAGE" 2>&1 | tr -d '\r')"
+  printf '%s\n' "$resolver_output" > "$ARTIFACTS/default-browser-${web_scheme}.txt"
+  if ! grep -F "$PACKAGE" <<< "$resolver_output" >/dev/null; then
+    echo "Browser is not registered as a $web_scheme handler." >&2
+    echo "$resolver_output" >&2
+    exit 1
+  fi
+done
+echo "PASS: Android resolves Browser for both HTTP and HTTPS VIEW intents." | tee "$ARTIFACTS/default-browser-results.txt"
+
 wait_for_log() {
   local pattern="$1"
   local expected_count="${2:-1}"
@@ -239,6 +256,22 @@ if ! grep -F "Local HTML Test" "$ARTIFACTS/local-html-open-logcat.txt" >/dev/nul
   exit 1
 fi
 printf 'PASS: local HTML document title and body rendered through Chromium file://.\n' | tee "$ARTIFACTS/local-html-results.txt"
+
+# Verify the actual PC toolbar button enables and disables desktop rendering mode.
+adb logcat -c
+adb shell am force-stop "$PACKAGE"
+adb shell am start -W -n "$ACTIVITY" \
+  --es com.search.browser.TEST_URL "https://example.com/" \
+  2>&1 | tee "$ARTIFACTS/desktop-site-launch.txt"
+wait_for_log "PAGE_TITLE window=1 title=Example Domain" 1 120
+wait_for_log "PAGE_LOAD_STATE loading=false" 1 120
+tap_accessibility_node desc "Show desktop site"
+wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 1 30
+wait_for_log "PAGE_LOAD_STATE loading=false" 2 120
+tap_accessibility_node desc "Desktop site enabled."
+wait_for_log "DESKTOP_SITE_MODE window=1 enabled=false" 1 30
+wait_for_log "PAGE_LOAD_STATE loading=false" 3 120
+printf 'PASS: PC control switched desktop mode on and back to mobile mode.\n' | tee "$ARTIFACTS/desktop-site-results.txt"
 
 # Continue with the original renderer-recovery suite using a normal launch.
 adb logcat -d -v threadtime > "$ARTIFACTS/adblock-enabled-restored-final-logcat.txt" 2>&1
