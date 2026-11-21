@@ -96,22 +96,6 @@ wait_for_log() {
   return 1
 }
 
-# A normal launch must open Android's default-browser chooser without a toolbar button.
-adb logcat -c
-adb shell am force-stop "$PACKAGE"
-adb shell am start -W -n "$ACTIVITY" 2>&1 | tee "$ARTIFACTS/default-browser-prompt-launch.txt"
-wait_for_log "DEFAULT_BROWSER_PROMPT_REQUESTED" 1 30
-adb shell input keyevent KEYCODE_BACK
-sleep 2
-DEFAULT_PROMPT_COUNT="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F -c "DEFAULT_BROWSER_PROMPT_REQUESTED" || true)"
-if [[ "$DEFAULT_PROMPT_COUNT" != "1" ]]; then
-  echo "Expected exactly one browser-role prompt during the app launch; found $DEFAULT_PROMPT_COUNT." >&2
-  adb logcat -d -s Browser:V >&2 || true
-  exit 1
-fi
-adb shell am force-stop "$PACKAGE"
-echo "PASS: default-browser chooser is requested on app launch, with no repeated prompt." | tee "$ARTIFACTS/default-browser-prompt-results.txt"
-
 wait_for_app_log() {
   local pattern="$1"
   local expected_count="$2"
@@ -167,6 +151,80 @@ PY
   read -r x y <<< "$coordinates"
   adb shell input tap "$x" "$y"
 }
+
+# Verify the actual PC toolbar button enables and disables desktop rendering mode.
+adb logcat -c
+adb shell am force-stop "$PACKAGE"
+adb shell am start -W -n "$ACTIVITY" \
+  --es com.search.browser.TEST_URL "https://example.com/" \
+  2>&1 | tee "$ARTIFACTS/desktop-site-launch.txt"
+wait_for_log "PAGE_TITLE window=1 title=Example Domain" 1 120
+wait_for_log "PAGE_LOAD_STATE loading=false" 1 120
+tap_accessibility_node desc "Show desktop site"
+wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 1 30
+wait_for_log "DESKTOP_PAGE_SCALE_APPLIED window=1" 1 30
+wait_for_log "PAGE_LOAD_STATE loading=false" 2 120
+DESKTOP_SCALE_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_PAGE_SCALE_APPLIED window=1" | tail -n1 || true)"
+if [[ ! "$DESKTOP_SCALE_LOG" =~ pageScaleFactor=0\.[0-9]+ ]]; then
+  echo "Expected desktop mode to scale the 1280px viewport to the phone surface; got: $DESKTOP_SCALE_LOG" >&2
+  adb logcat -d -s Browser:V >&2 || true
+  exit 1
+fi
+adb exec-out screencap -p > "$ARTIFACTS/desktop-site-scaled.png"
+tap_accessibility_node desc "Desktop site enabled."
+wait_for_log "DESKTOP_SITE_MODE window=1 enabled=false" 1 30
+wait_for_log "PAGE_LOAD_STATE loading=false" 3 120
+printf 'PASS: PC control switched desktop mode on and back to mobile mode.\n' | tee "$ARTIFACTS/desktop-site-results.txt"
+
+# A normal launch must open Android's default-browser chooser without a toolbar button.
+adb logcat -c
+adb shell am force-stop "$PACKAGE"
+adb shell am start -W -n "$ACTIVITY" 2>&1 | tee "$ARTIFACTS/default-browser-prompt-launch.txt"
+wait_for_log "DEFAULT_BROWSER_PROMPT_REQUESTED" 1 30
+ROLE_PICKER_DUMP="$ARTIFACTS/default-browser-role-picker-before-cancel.txt"
+ROLE_PICKER_VISIBLE=false
+role_picker_is_resumed() {
+  grep -E 'topResumedActivity=|ResumedActivity:|mResumedActivity:|Resumed:' "$1" | \
+    grep -F "RequestRoleActivity" >/dev/null
+}
+for attempt in $(seq 1 30); do
+  adb shell dumpsys activity activities > "$ROLE_PICKER_DUMP" 2>&1
+  if role_picker_is_resumed "$ROLE_PICKER_DUMP"; then
+    ROLE_PICKER_VISIBLE=true
+    break
+  fi
+  sleep 1
+done
+if [[ "$ROLE_PICKER_VISIBLE" != "true" ]]; then
+  echo "Android's browser-role chooser did not become visible after the app requested it." >&2
+  cat "$ROLE_PICKER_DUMP" >&2
+  exit 1
+fi
+# On slow emulator boots, BACK must not be sent before the chooser is actually foregrounded.
+ROLE_PICKER_DISMISSED=false
+for attempt in $(seq 1 8); do
+  adb shell input keyevent KEYCODE_BACK
+  sleep 1
+  adb shell dumpsys activity activities > "$ARTIFACTS/default-browser-role-picker-after-cancel.txt" 2>&1
+  if ! role_picker_is_resumed "$ARTIFACTS/default-browser-role-picker-after-cancel.txt"; then
+    ROLE_PICKER_DISMISSED=true
+    break
+  fi
+done
+if [[ "$ROLE_PICKER_DISMISSED" != "true" ]]; then
+  echo "Android's browser-role chooser remained in the foreground after BACK." >&2
+  cat "$ARTIFACTS/default-browser-role-picker-after-cancel.txt" >&2
+  exit 1
+fi
+DEFAULT_PROMPT_COUNT="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F -c "DEFAULT_BROWSER_PROMPT_REQUESTED" || true)"
+if [[ "$DEFAULT_PROMPT_COUNT" != "1" ]]; then
+  echo "Expected exactly one browser-role prompt during the app launch; found $DEFAULT_PROMPT_COUNT." >&2
+  adb logcat -d -s Browser:V >&2 || true
+  exit 1
+fi
+adb shell am force-stop "$PACKAGE"
+echo "PASS: default-browser chooser appears on app launch and can be dismissed cleanly." | tee "$ARTIFACTS/default-browser-prompt-results.txt"
+
 
 run_adblock_phase() {
   local phase="$1"
@@ -254,7 +312,7 @@ wait_for_log "AD_BLOCK_TOGGLED enabled=true windows=1" 1 30
 sleep 2
 run_adblock_phase "enabled-restored" "true" "yes"
 
-# Verify the browser can load a local HTML file through Chromium's file:// scheme.
+# Verify an imported HTML file is rendered as an isolated local document by Chromium.
 adb logcat -c
 adb shell am force-stop "$PACKAGE"
 adb shell am start -W -n "$ACTIVITY" \
@@ -262,6 +320,8 @@ adb shell am start -W -n "$ACTIVITY" \
   2>&1 | tee "$ARTIFACTS/local-html-open-launch.txt"
 wait_for_log "LOCAL_HTML_TEST_FIXTURE_CREATED" 1 30
 wait_for_log "LOCAL_HTML_TEST_FILE_IMPORTED" 1 30
+wait_for_log "LOCAL_HTML_FILE_OPENED" 1 30
+wait_for_log "LOCAL_HTML_DOCUMENT_VERIFIED success=true" 1 60
 wait_for_log "LOCAL_HTML_DOM_DIAGNOSTICS" 1 60
 wait_for_log "PAGE_LOAD_STATE loading=false" 1 60
 adb logcat -d -v threadtime > "$ARTIFACTS/local-html-open-logcat.txt" 2>&1
@@ -271,31 +331,7 @@ if ! grep -F "Local HTML Test" "$ARTIFACTS/local-html-open-logcat.txt" >/dev/nul
   grep -F "LOCAL_HTML_DOM_DIAGNOSTICS" "$ARTIFACTS/local-html-open-logcat.txt" >&2 || true
   exit 1
 fi
-printf 'PASS: local HTML document title and body rendered through Chromium file://.\n' | tee "$ARTIFACTS/local-html-results.txt"
-
-# Verify the actual PC toolbar button enables and disables desktop rendering mode.
-adb logcat -c
-adb shell am force-stop "$PACKAGE"
-adb shell am start -W -n "$ACTIVITY" \
-  --es com.search.browser.TEST_URL "https://example.com/" \
-  2>&1 | tee "$ARTIFACTS/desktop-site-launch.txt"
-wait_for_log "PAGE_TITLE window=1 title=Example Domain" 1 120
-wait_for_log "PAGE_LOAD_STATE loading=false" 1 120
-tap_accessibility_node desc "Show desktop site"
-wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 1 30
-wait_for_log "DESKTOP_PAGE_SCALE_APPLIED window=1" 1 30
-wait_for_log "PAGE_LOAD_STATE loading=false" 2 120
-DESKTOP_SCALE_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_PAGE_SCALE_APPLIED window=1" | tail -n1 || true)"
-if [[ ! "$DESKTOP_SCALE_LOG" =~ pageScaleFactor=0\.[0-9]+ ]]; then
-  echo "Expected desktop mode to scale the 1280px viewport to the phone surface; got: $DESKTOP_SCALE_LOG" >&2
-  adb logcat -d -s Browser:V >&2 || true
-  exit 1
-fi
-adb exec-out screencap -p > "$ARTIFACTS/desktop-site-scaled.png"
-tap_accessibility_node desc "Desktop site enabled."
-wait_for_log "DESKTOP_SITE_MODE window=1 enabled=false" 1 30
-wait_for_log "PAGE_LOAD_STATE loading=false" 3 120
-printf 'PASS: PC control switched desktop mode on and back to mobile mode.\n' | tee "$ARTIFACTS/desktop-site-results.txt"
+printf 'PASS: imported local HTML document title and body rendered by Chromium.\n' | tee "$ARTIFACTS/local-html-results.txt"
 
 # Continue with the original renderer-recovery suite using a normal launch.
 adb logcat -d -v threadtime > "$ARTIFACTS/adblock-enabled-restored-final-logcat.txt" 2>&1

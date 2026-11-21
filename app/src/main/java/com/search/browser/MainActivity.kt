@@ -76,7 +76,8 @@ class MainActivity : AppCompatActivity() {
         var title: String,
         var url: String,
         val incognito: Boolean,
-        var desktopMode: Boolean = false
+        var desktopMode: Boolean = false,
+        var localHtmlDisplayName: String? = null
     )
 
     private lateinit var browser: CefriumBrowser
@@ -195,14 +196,14 @@ class MainActivity : AppCompatActivity() {
             null
         }
         val incomingUrl = intent.dataString?.takeIf(::isSupportedWebUrl)
+        val localHtmlFile = incomingHtmlFile ?: testHtmlFile
         val startUrl = testUrl ?: incomingUrl
-            ?: incomingHtmlFile?.let { Uri.fromFile(it).toString() }
-            ?: testHtmlFile?.let { Uri.fromFile(it).toString() }
-            ?: lastSuccessfulUrl
+            ?: if (localHtmlFile != null) "about:blank" else lastSuccessfulUrl
         if (incomingHtmlUri != null && incomingHtmlFile == null) {
             Toast.makeText(this, "Unable to open this HTML file", Toast.LENGTH_LONG).show()
         }
         attachBrowser(startUrl, savedInstanceState?.getBundle(KEY_BROWSER_STATE))
+        localHtmlFile?.let(::loadHtmlDocumentFile)
         if (intent.getBooleanExtra(EXTRA_SHOW_DOWNLOADS, false)) showDownloadsPanel()
         retryCompletedStagingSavesAfterRestore()
 
@@ -418,17 +419,23 @@ class MainActivity : AppCompatActivity() {
 
         instance.setNavigationClient(object : CefriumNavigationClient {
             override fun onUrlChanged(browser: CefriumBrowser, url: String) {
-                window.url = url
+                val isLocalHtmlDocument = window.localHtmlDisplayName != null && url.startsWith("data:")
+                if (!isLocalHtmlDocument) {
+                    window.localHtmlDisplayName = null
+                    window.url = url
+                }
                 if (activeWindowId == windowId) {
-                    lastRequestedUrl = url
+                    lastRequestedUrl = if (isLocalHtmlDocument) window.url else url
                     runOnUiThread {
                         if (activeWindowId == windowId) {
-                            if (!searchField.hasFocus()) searchField.setText(url)
+                            if (!searchField.hasFocus()) {
+                                searchField.setText(window.localHtmlDisplayName ?: url)
+                            }
                             updateDesktopSiteButton()
                         }
                     }
                 }
-                Log.i(TAG, "PAGE_URL_CHANGED window=$windowId incognito=${window.incognito} url=${if (window.incognito) "<private>" else url}")
+                Log.i(TAG, "PAGE_URL_CHANGED window=$windowId incognito=${window.incognito} url=${if (window.incognito) "<private>" else if (isLocalHtmlDocument) "<local-html>" else url}")
             }
 
             override fun onLoadingStateChanged(
@@ -450,7 +457,8 @@ class MainActivity : AppCompatActivity() {
                     }
                     Log.i(TAG, "AD_BLOCK_PAGE_STATS window=$windowId enabled=$adBlockingEnabled blockedRequests=${instance.getBlockedCount()}")
                     val pageUrl = instance.getUrl().orEmpty().ifBlank { window.url }
-                    window.url = pageUrl
+                    val isLocalHtmlDocument = window.localHtmlDisplayName != null && pageUrl.startsWith("data:")
+                    if (!isLocalHtmlDocument) window.url = pageUrl
                     if (pageUrl.startsWith("https://") || pageUrl.startsWith("http://")) {
                         if (!window.incognito && isActiveWindow) {
                             lastSuccessfulUrl = pageUrl
@@ -467,7 +475,7 @@ class MainActivity : AppCompatActivity() {
                     if (BuildConfig.DEBUG && isActiveWindow && !window.incognito) {
                         browserSlot.postDelayed({ captureAndVerifyPage(instance, pageUrl) }, 1000L)
                         if (intent.getBooleanExtra(EXTRA_TEST_OPEN_HTML_FILE, false) &&
-                            pageUrl.startsWith("file://")
+                            isLocalHtmlDocument
                         ) {
                             browserSlot.postDelayed({
                                 instance.evaluateJavaScript(
@@ -1413,7 +1421,7 @@ class MainActivity : AppCompatActivity() {
         lastRequestedUrl = target.url
         if (!target.incognito && target.url.startsWith("http")) lastSuccessfulUrl = target.url
         searchField.hint = if (target.incognito) "Incognito browsing" else "Search or enter address"
-        searchField.setText(target.url)
+        searchField.setText(target.localHtmlDisplayName ?: target.url)
         showBrowser()
         updateWindowsButton()
         updateShieldButton()
@@ -1502,19 +1510,32 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Choose a valid HTML file", Toast.LENGTH_LONG).show()
             return
         }
+        loadHtmlDocumentFile(file)
+    }
+
+    private fun loadHtmlDocumentFile(file: File) {
+        val html = runCatching { file.readText(Charsets.UTF_8) }.getOrElse { error ->
+            Log.e(TAG, "Unable to read imported HTML document name=${file.name}", error)
+            Toast.makeText(this, "Unable to read this HTML file", Toast.LENGTH_LONG).show()
+            return
+        }
+        val window = browserWindows.firstOrNull { it.id == activeWindowId } ?: return
         val fileUrl = Uri.fromFile(file).toString()
+        window.localHtmlDisplayName = file.name
+        window.url = fileUrl
         showBrowser()
         rendererRecoveryAttempts = 0
         rendererRecoveryPending = false
         lastRequestedUrl = fileUrl
         rendererErrorPanel.visibility = View.GONE
-        browser.loadUrl(fileUrl)
-        browserWindows.firstOrNull { it.id == activeWindowId }?.url = fileUrl
+        // Cefrium serves loadHtml content from an opaque data: origin, so Chromium's isolated renderer
+        // does not need direct access to the app-private file:// path.
+        browser.loadHtml(html)
         searchField.setText(file.name)
         searchField.clearFocus()
         (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
             ?.hideSoftInputFromWindow(searchField.windowToken, 0)
-        Log.i(TAG, "LOCAL_HTML_FILE_OPENED name=${file.name}")
+        Log.i(TAG, "LOCAL_HTML_FILE_OPENED name=${file.name} loader=loadHtml bytes=${file.length()}")
     }
 
     private fun isLocalHtmlDocument(uri: Uri, suppliedMimeType: String? = null): Boolean {
