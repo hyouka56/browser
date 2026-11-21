@@ -152,6 +152,77 @@ PY
   adb shell input tap "$x" "$y"
 }
 
+
+dismiss_external_anr_dialog_if_present() {
+  local window_dump
+  window_dump="$(adb shell dumpsys window 2>/dev/null || true)"
+  if ! grep -F "Application Not Responding" <<< "$window_dump" >/dev/null; then
+    return 0
+  fi
+
+  local hierarchy="$ARTIFACTS/ui-hierarchy-anr-$RANDOM.xml"
+  adb shell uiautomator dump /sdcard/browser-anr.xml >/dev/null 2>&1 || {
+    echo "Could not inspect the active system ANR dialog." >&2
+    return 1
+  }
+  adb exec-out cat /sdcard/browser-anr.xml > "$hierarchy"
+
+  local alert_title
+  if ! alert_title="$(python3 - "$hierarchy" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+for node in root.iter("node"):
+    if node.attrib.get("resource-id") == "android:id/alertTitle":
+        print(node.attrib.get("text", ""))
+        raise SystemExit(0)
+raise SystemExit("No system ANR alert title was found")
+PY
+  )"; then
+    echo "The ANR window is present, but its title could not be verified." >&2
+    return 1
+  fi
+
+  if [[ "$alert_title" != *"isn't responding"* ]] || grep -qi "browser" <<< "$alert_title"; then
+    echo "Refusing to dismiss an ANR dialog that is not confirmed to belong to another app: $alert_title" >&2
+    return 1
+  fi
+
+  echo "External ANR dialog detected for '$alert_title'; choosing its accessible Wait action."
+  if ! tap_accessibility_node text "Wait"; then
+    echo "The external ANR dialog did not expose a clickable Wait action." >&2
+    return 1
+  fi
+
+  for attempt in $(seq 1 10); do
+    if ! adb shell dumpsys window 2>/dev/null | grep -F "Application Not Responding" >/dev/null; then
+      echo "PASS: external system ANR dialog dismissed with Wait."
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "The external system ANR dialog remained after selecting Wait." >&2
+  return 1
+}
+
+tap_accessibility_node_with_system_recovery() {
+  local mode="$1"
+  local selector="$2"
+  for attempt in $(seq 1 4); do
+    if tap_accessibility_node "$mode" "$selector"; then
+      return 0
+    fi
+    if ! dismiss_external_anr_dialog_if_present; then
+      return 1
+    fi
+    sleep 1
+  done
+  echo "Could not tap accessibility node after checking for external system ANR dialogs: $mode=$selector" >&2
+  return 1
+}
+
 # Verify the actual PC toolbar button enables and disables desktop rendering mode.
 adb logcat -c
 adb shell am force-stop "$PACKAGE"
@@ -160,7 +231,7 @@ adb shell am start -W -n "$ACTIVITY" \
   2>&1 | tee "$ARTIFACTS/desktop-site-launch.txt"
 wait_for_log "PAGE_TITLE window=1 title=Example Domain" 1 120
 wait_for_log "PAGE_LOAD_STATE loading=false" 1 120
-tap_accessibility_node desc "Show desktop site"
+tap_accessibility_node_with_system_recovery desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 1 30
 wait_for_log "DESKTOP_PAGE_SCALE_APPLIED window=1" 1 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 2 120
@@ -171,7 +242,7 @@ if [[ ! "$DESKTOP_SCALE_LOG" =~ pageScaleFactor=0\.[0-9]+ ]]; then
   exit 1
 fi
 adb exec-out screencap -p > "$ARTIFACTS/desktop-site-scaled.png"
-tap_accessibility_node desc "Desktop site enabled."
+tap_accessibility_node_with_system_recovery desc "Desktop site enabled."
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=false" 1 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 3 120
 printf 'PASS: PC control switched desktop mode on and back to mobile mode.\n' | tee "$ARTIFACTS/desktop-site-results.txt"
@@ -203,7 +274,7 @@ fi
 # Dismiss the real system dialog through its visible Cancel action. Some Android versions
 # keep RequestRoleActivity resumed when BACK is sent, even though the dialog exposes Cancel.
 ROLE_PICKER_DISMISSED=false
-if tap_accessibility_node text "Cancel"; then
+if tap_accessibility_node_with_system_recovery text "Cancel"; then
   for attempt in $(seq 1 15); do
     sleep 1
     adb shell dumpsys activity activities > "$ARTIFACTS/default-browser-role-picker-after-cancel.txt" 2>&1
@@ -306,7 +377,7 @@ wait_for_log "AD_BLOCK_TEST_MULTIWINDOW_CREATED windows=2" 1 30
 wait_for_log "AD_BLOCK_CONFIG enabled=true tvLite=false" 2 90
 
 # Use the actual shield control, not a synthetic state change.
-tap_accessibility_node desc "Ad blocker on"
+tap_accessibility_node_with_system_recovery desc "Ad blocker on"
 wait_for_log "AD_BLOCK_TOGGLED enabled=false windows=2" 1 30
 WINDOW_TOGGLE_COUNT="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "AD_BLOCK_WINDOW_TOGGLED" | grep -F "enabled=false" | wc -l | tr -d ' ')"
 if [[ "$WINDOW_TOGGLE_COUNT" != "2" ]]; then
@@ -321,7 +392,7 @@ sleep 2
 run_adblock_phase "disabled-persisted" "false" "no"
 
 # Re-enable it through the actual shield and verify the enabled setting survives restart.
-tap_accessibility_node desc "Ad blocker off"
+tap_accessibility_node_with_system_recovery desc "Ad blocker off"
 wait_for_log "AD_BLOCK_TOGGLED enabled=true windows=1" 1 30
 sleep 2
 run_adblock_phase "enabled-restored" "true" "yes"
@@ -395,18 +466,8 @@ sleep 1
 # renderer recovery. It is not the Browser process. Choose Wait so the modal
 # dialog does not swallow the test-page taps; never close the Browser under test.
 if adb shell dumpsys window 2>/dev/null | grep -F "Application Not Responding" >/dev/null; then
-  echo "System ANR dialog detected for another app; selecting Wait before download taps."
-  adb shell input tap 360 1340
-  for attempt in $(seq 1 10); do
-    if ! adb shell dumpsys window 2>/dev/null | grep -F "Application Not Responding" >/dev/null; then
-      break
-    fi
-    sleep 1
-  done
-  if adb shell dumpsys window 2>/dev/null | grep -F "Application Not Responding" >/dev/null; then
-    echo "System ANR dialog remained after choosing Wait." >&2
-    exit 1
-  fi
+  echo "System ANR dialog detected before download taps; validating it belongs to another app."
+  dismiss_external_anr_dialog_if_present
 fi
 
 # The app must be resumed after renderer recovery while the download page is still visible.
