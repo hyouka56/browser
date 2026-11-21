@@ -255,6 +255,7 @@ wait_for_log "DESKTOP_SITE_INITIAL_STATE window=1 enabled=false" 1 30
 wait_for_log "MOBILE_USER_AGENT_BASELINE_CAPTURED window=1" 1 30
 tap_accessibility_node_with_system_recovery desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 1 30
+wait_for_log "DESKTOP_PAGE_SCALE_RESET window=1 success=true" 1 30
 wait_for_log "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" 1 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 2 120
 wait_for_log "PAGE_BITMAP_CAPTURED url=https://example.com/" 2 90
@@ -283,13 +284,22 @@ body = data.get("bodyText", "")
 width = int(data.get("innerWidth", 0))
 client = int(data.get("clientWidth", 0))
 scroll = int(data.get("scrollWidth", 0))
+visual = float(data.get("visualViewportWidth", 0))
+visual_scale = float(data.get("visualViewportScale", 0))
+dpr = float(data.get("devicePixelRatio", 0))
 if "Example Domain" not in data.get("title", "") or "This domain is for use in documentation examples" not in body:
     raise SystemExit(f"Desktop page content is missing: {data}")
 if width < 768 or client < 768:
     raise SystemExit(f"Desktop CSS viewport did not reach the wide layout breakpoint: {data}")
+if abs(visual - width) > max(8, width * 0.02):
+    raise SystemExit(f"Visual viewport is narrower than the CSS layout viewport: {data}")
+if abs(visual_scale - 1.0) > 0.05:
+    raise SystemExit(f"Page scale was not reset to 1.0: {data}")
+if abs(dpr - 1.0) > 0.05:
+    raise SystemExit(f"Desktop DPR is not the ordinary 1.0 scale: {data}")
 if scroll > client + 8:
     raise SystemExit(f"Desktop page still overflows horizontally: {data}")
-print(f"PASS: desktop page content rendered at {width}px with no horizontal overflow after native zoom was applied")
+print(f"PASS: desktop page rendered at {width}px; visualViewport={visual}px, pageScale={visual_scale:.3f}, DPR={dpr:.3f}; no horizontal overflow")
 PY
 sleep 1
 adb exec-out screencap -p > "$ARTIFACTS/desktop-site-scaled.png"
@@ -346,6 +356,7 @@ printf 'PASS: Google search page loaded in mobile mode before the PC-mode test; 
 tap_accessibility_node_with_system_recovery desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 2 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 5 120
+wait_for_log "DESKTOP_PAGE_SCALE_RESET window=1 success=true" 2 45
 wait_for_log "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" 2 45
 wait_for_log "DESKTOP_DOM_DIAGNOSTICS window=1" 2 45
 sleep 3
@@ -370,13 +381,20 @@ body = data.get("bodyText", "")
 width = int(data.get("innerWidth", 0))
 client = int(data.get("clientWidth", 0))
 scroll = int(data.get("scrollWidth", 0))
+visual = float(data.get("visualViewportWidth", 0))
+visual_scale = float(data.get("visualViewportScale", 0))
+dpr = float(data.get("devicePixelRatio", 0))
 if "Google" not in title or not body.strip():
     raise SystemExit(f"Google page did not render in PC mode: {data}")
 if width < 768 or client < 768:
     raise SystemExit(f"Google did not switch to a desktop-width CSS viewport: {data}")
+if abs(visual - width) > max(8, width * 0.02):
+    raise SystemExit(f"Google visual viewport is narrower than its layout viewport: {data}")
+if abs(visual_scale - 1.0) > 0.05 or abs(dpr - 1.0) > 0.05:
+    raise SystemExit(f"Google desktop page has unexpected zoom or DPR: {data}")
 if scroll > client + 8:
     raise SystemExit(f"Google desktop page has horizontal overflow: {data}")
-print(f"PASS: Google desktop search page rendered in PC mode at {width}px (client={client}, scroll={scroll}); no horizontal overflow.")
+print(f"PASS: Google desktop search page rendered in PC mode at {width}px; visualViewport={visual}px, pageScale={visual_scale:.3f}, DPR={dpr:.3f}; no horizontal overflow.")
 PY
 if [[ ! -s "$ARTIFACTS/google-desktop-search.png" ]] || [[ "$(wc -c < "$ARTIFACTS/google-desktop-search.png")" -le 10000 ]]; then
   echo "Google PC-mode screenshot was not captured correctly." >&2
@@ -455,6 +473,7 @@ tap_accessibility_node_with_system_recovery desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 3 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 8 120
 wait_for_log "DESKTOP_DEVICE_METRICS_APPLIED window=1" 3 45
+wait_for_log "DESKTOP_PAGE_SCALE_RESET window=1 success=true" 3 45
 wait_for_log "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" 3 45
 wait_for_log "DESKTOP_DOM_DIAGNOSTICS window=1" 3 45
 sleep 4
@@ -478,6 +497,9 @@ title = data.get("title", "")
 body = data.get("bodyText", "")
 inner = int(data.get("innerWidth", 0))
 client = int(data.get("clientWidth", 0))
+visual = float(data.get("visualViewportWidth", 0))
+visual_scale = float(data.get("visualViewportScale", 0))
+dpr = float(data.get("devicePixelRatio", 0))
 doc_scroll = int(data.get("scrollWidth", 0))
 body_client = int(data.get("bodyClientWidth", 0))
 body_scroll = int(data.get("bodyScrollWidth", 0))
@@ -486,11 +508,23 @@ doc_rect = int(data.get("documentRectWidth", 0))
 if not title.strip() or not body.strip() or "github" not in title.lower() and "browser" not in title.lower():
     print(f"FAIL: GitHub repository page did not render in PC mode: {data}")
 else:
-    print(f"PASS: GitHub repository page loaded in PC mode; title={title!r}, innerWidth={inner}px, client={client}px, documentScroll={doc_scroll}px, bodyScroll={body_scroll}px, bodyRect={body_rect}px, documentRect={doc_rect}px, visualScale={data.get('visualViewportScale')}")
+    print(f"PASS: GitHub repository page loaded in PC mode; title={title!r}, innerWidth={inner}px, visualViewport={visual}px, pageScale={visual_scale:.3f}, DPR={dpr:.3f}, client={client}px, documentScroll={doc_scroll}px, bodyScroll={body_scroll}px, bodyRect={body_rect}px, documentRect={doc_rect}px")
 if not 1200 <= inner <= 1360 or not 1200 <= client <= 1360:
     print(f"FAIL: GitHub CSS viewport is not close to the requested 1280px: innerWidth={inner}, clientWidth={client}")
 else:
     print(f"PASS: GitHub CSS viewport is {inner}px, close to the requested 1280px.")
+if abs(visual - inner) > max(8, inner * 0.02):
+    print(f"FAIL: GitHub visual viewport is narrower than its desktop layout viewport: visual={visual}, inner={inner}")
+else:
+    print(f"PASS: GitHub visual viewport spans the full layout viewport ({visual}px).")
+if abs(visual_scale - 1.0) > 0.05:
+    print(f"FAIL: GitHub page scale was not reset to 1.0: {visual_scale}")
+else:
+    print("PASS: GitHub page scale reset to 1.0.")
+if abs(dpr - 1.0) > 0.05:
+    print(f"FAIL: GitHub desktop DPR is not 1.0: {dpr}")
+else:
+    print("PASS: GitHub desktop DPR is 1.0.")
 # A full-width desktop layout must keep the repo's main content near the left edge.
 import xml.etree.ElementTree as ET
 ui_root = ET.parse(sys.argv[2]).getroot()
@@ -1034,7 +1068,10 @@ report = {
         "cefrium_chromium_engine_logged": "CEF_ENGINE version=0.21.0 chromium=156.0.8078.96" in log,
         "page_title_verified": "PAGE_TITLE window=1 title=Example Domain" in log,
         "page_load_completed": "PAGE_LOAD_STATE loading=false" in log,
-        "desktop_page_content_rendered_without_horizontal_overflow": "PASS: desktop page content rendered at" in desktop_site_results and "with no horizontal overflow after native zoom was applied" in desktop_site_results,
+        "desktop_page_content_rendered_without_horizontal_overflow": "PASS: desktop page rendered at" in desktop_site_results and "no horizontal overflow" in desktop_site_results,
+        "desktop_page_scale_reset_to_one": desktop_site_results.count("page scale reset to 1.0") >= 1,
+        "desktop_visual_viewport_matches_layout_viewport": "visual viewport spans the full layout viewport" in desktop_site_results,
+        "desktop_device_pixel_ratio_is_one": "desktop DPR is 1.0" in desktop_site_results,
         "mobile_css_viewport_restored_after_disabling_desktop_mode": "PASS: mobile CSS viewport restored to" in desktop_site_results,
         "mobile_user_agent_restored_after_disabling_desktop_mode": "PASS: Android mobile user-agent, Android navigator.platform, and mobile UA metadata restored after disabling PC mode" in desktop_site_results,
         "google_desktop_search_page_rendered_in_pc_mode": (
