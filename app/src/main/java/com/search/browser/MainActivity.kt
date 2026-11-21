@@ -244,9 +244,8 @@ class MainActivity : AppCompatActivity() {
         Log.i(TAG, "PULL_TO_REFRESH_CONFIG native=${!BuildConfig.TV_LITE}")
         val windowId = replaceWindowId ?: nextWindowId++
         val existingWindow = browserWindows.firstOrNull { it.id == windowId }
-        val initialDesktopMode = desktopMode
-            ?: existingWindow?.desktopMode
-            ?: preferences.getBoolean(KEY_DESKTOP_SITE, false)
+        // Desktop-site mode is opt-in per tab. Never inherit a stale global preference.
+        val initialDesktopMode = desktopMode ?: existingWindow?.desktopMode ?: false
         val window = existingWindow?.also {
             it.browser = instance
             it.title = "New tab"
@@ -1140,9 +1139,7 @@ class MainActivity : AppCompatActivity() {
 
         val enabled = !activeWindow.desktopMode
         activeWindow.desktopMode = enabled
-        if (!activeWindow.incognito) {
-            preferences.edit().putBoolean(KEY_DESKTOP_SITE, enabled).apply()
-        }
+        // Keep the PC toggle scoped to this tab; new tabs always start in mobile mode.
         applyDesktopSiteSettings(activeWindow.browser, enabled)
         activeWindow.url = currentUrl
         lastRequestedUrl = currentUrl
@@ -1222,19 +1219,29 @@ class MainActivity : AppCompatActivity() {
                 return@post
             }
 
-            // The desktop viewport is expressed in CSS pixels with deviceScaleFactor=1.
-            // Scale it to the actual surface width so the full desktop layout is visible on phones.
-            val pageScaleFactor = (viewportWidthPx.toDouble() / DESKTOP_VIEWPORT_WIDTH.toDouble())
+            // Keep a desktop CSS viewport (1280px), but render it into the phone's
+            // physical surface width. setPageScaleFactor is unreliable when the
+            // emulated device is marked non-mobile, so express the fit as DPR instead.
+            val deviceScaleFactor = (viewportWidthPx.toDouble() / DESKTOP_VIEWPORT_WIDTH.toDouble())
                 .coerceIn(0.1, 1.0)
-            val params = JSONObject().put("pageScaleFactor", pageScaleFactor).toString()
-            target.executeDevToolsMethod("Emulation.setPageScaleFactor", params) { success, resultJson ->
+            val metrics = JSONObject()
+                .put("width", DESKTOP_VIEWPORT_WIDTH)
+                .put("height", DESKTOP_VIEWPORT_HEIGHT)
+                .put("screenWidth", DESKTOP_VIEWPORT_WIDTH)
+                .put("screenHeight", DESKTOP_VIEWPORT_HEIGHT)
+                .put("deviceScaleFactor", deviceScaleFactor)
+                .put("mobile", false)
+            target.executeDevToolsMethod(
+                "Emulation.setDeviceMetricsOverride",
+                metrics.toString()
+            ) { success, resultJson ->
                 if (success) {
                     Log.i(
                         TAG,
-                        "DESKTOP_PAGE_SCALE_APPLIED window=${activeWindow.id} widthPx=$viewportWidthPx pageScaleFactor=$pageScaleFactor"
+                        "DESKTOP_VIEWPORT_FIT_APPLIED window=${activeWindow.id} surfaceWidthPx=$viewportWidthPx deviceScaleFactor=$deviceScaleFactor"
                     )
                 } else {
-                    Log.w(TAG, "DESKTOP_PAGE_SCALE_FAILED window=${activeWindow.id} result=$resultJson")
+                    Log.w(TAG, "DESKTOP_VIEWPORT_FIT_FAILED window=${activeWindow.id} result=$resultJson")
                 }
             }
         }
