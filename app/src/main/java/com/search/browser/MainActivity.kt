@@ -1254,8 +1254,17 @@ class MainActivity : AppCompatActivity() {
         } else {
             // Restore Chromium's default mobile scale and user agent before reloading.
             target.setUserAgentOverride(null)
+            // Cefrium's native override and Chromium's DevTools Emulation override are
+            // independent. Clearing only the native value leaves Windows UA metadata
+            // active, so Google can continue rendering its desktop search UI.
+            target.executeDevToolsMethod(
+                "Emulation.setUserAgentOverride",
+                JSONObject().put("userAgent", "").toString(),
+                null
+            )
             target.setZoomLevel(0.0)
             val activeWindow = browserWindows.firstOrNull { it.browser === target }
+            Log.i(TAG, "MOBILE_USER_AGENT_OVERRIDE_CLEARED window=${activeWindow?.id ?: -1}")
             Log.i(TAG, "MOBILE_VIEWPORT_ZOOM_RESET window=${activeWindow?.id ?: -1}")
         }
     }

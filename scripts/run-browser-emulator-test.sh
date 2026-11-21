@@ -264,8 +264,8 @@ client = int(data.get("clientWidth", 0))
 scroll = int(data.get("scrollWidth", 0))
 if "Example Domain" not in data.get("title", "") or "This domain is for use in documentation examples" not in body:
     raise SystemExit(f"Desktop page content is missing: {data}")
-if width <= 0 or client <= 0:
-    raise SystemExit(f"Desktop page has an invalid CSS viewport: {data}")
+if width < 768 or client < 768:
+    raise SystemExit(f"Desktop CSS viewport did not reach the wide layout breakpoint: {data}")
 if scroll > client + 8:
     raise SystemExit(f"Desktop page still overflows horizontally: {data}")
 print(f"PASS: desktop page content rendered at {width}px with no horizontal overflow after native zoom was applied")
@@ -296,9 +296,9 @@ data = json.loads(match.group(1))
 if isinstance(data, str):
     data = json.loads(data)
 ua = data.get("userAgent", "")
-if "Windows NT" in ua or data.get("mobile") is not True:
-    raise SystemExit(f"Desktop user-agent was not cleared after disabling PC mode: {data}")
-print("PASS: default mobile user-agent and mobile UA metadata restored after disabling PC mode")
+if "Windows NT" in ua or "Android" not in ua or data.get("mobile") is not True or data.get("platform") == "Win32":
+    raise SystemExit(f"Android mobile user-agent and metadata were not restored after disabling PC mode: {data}")
+print("PASS: Android mobile user-agent, navigator.platform, and mobile UA metadata restored after disabling PC mode")
 PY
 printf 'PASS: PC control switched desktop mode on and back to mobile mode.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
 
@@ -805,7 +805,7 @@ report = {
         "page_load_completed": "PAGE_LOAD_STATE loading=false" in log,
         "desktop_page_content_rendered_without_horizontal_overflow": "PASS: desktop page content rendered at" in desktop_site_results and "with no horizontal overflow after native zoom was applied" in desktop_site_results,
         "mobile_css_viewport_restored_after_disabling_desktop_mode": "PASS: mobile CSS viewport restored to" in desktop_site_results,
-        "mobile_user_agent_restored_after_disabling_desktop_mode": "PASS: default mobile user-agent and mobile UA metadata restored after disabling PC mode" in desktop_site_results,
+        "mobile_user_agent_restored_after_disabling_desktop_mode": "PASS: Android mobile user-agent, navigator.platform, and mobile UA metadata restored after disabling PC mode" in desktop_site_results,
         "desktop_site_toggle_returns_to_mobile_mode": "PASS: PC control switched desktop mode on and back to mobile mode." in desktop_site_results,
         "android_open_with_lists_browser_for_html_and_xhtml": (
             (folder / "open-with-results.txt").is_file() and
