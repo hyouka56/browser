@@ -508,6 +508,13 @@ class MainActivity : AppCompatActivity() {
                                                 clientWidth: document.documentElement?.clientWidth || 0,
                                                 scrollWidth: document.documentElement?.scrollWidth || 0,
                                                 visualViewportWidth: Math.round(window.visualViewport?.width || 0),
+                                                visualViewportHeight: Math.round(window.visualViewport?.height || 0),
+                                                visualViewportScale: Number((window.visualViewport?.scale || 0).toFixed(4)),
+                                                visualViewportOffsetLeft: Number((window.visualViewport?.offsetLeft || 0).toFixed(2)),
+                                                visualViewportOffsetTop: Number((window.visualViewport?.offsetTop || 0).toFixed(2)),
+                                                documentElementRectWidth: Math.round(document.documentElement?.getBoundingClientRect().width || 0),
+                                                bodyRectWidth: Math.round(document.body?.getBoundingClientRect().width || 0),
+                                                href: location.href,
                                                 screenHeight: screen.height
                                             })"""
                                         ) { result ->
@@ -1349,48 +1356,62 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
-            // A page zoom cannot select the page's CSS layout width. Ask Chromium
-            // for a real desktop viewport, then scale that desktop canvas into the
-            // measured Android surface. The DPR is 1 to emulate an ordinary desktop.
+            // Keep a real desktop CSS viewport and a normal desktop DPR. The
+            // separate CDP `scale` transform fits the rendered desktop canvas into
+            // the Android surface and applies the inverse mapping to touch events.
+            // Using a sub-1 deviceScaleFactor here changes DPR/font metrics instead
+            // of expressing the output fit, and can leave mobile/desktop scales mixed.
             val targetCssWidth = DESKTOP_VIEWPORT_WIDTH
             val targetCssHeight = Math.round(
                 targetCssWidth.toDouble() * surfaceHeightPx.toDouble() / surfaceWidthPx.toDouble()
             ).toInt().coerceAtLeast(1)
-            // Map the full CSS desktop viewport onto the physical Android surface
-            // through DPR, not page zoom. Page zoom changes layout breakpoints and
-            // can move GitHub's main column off the visible left side.
-            val surfaceScale = (surfaceWidthPx.toDouble() / targetCssWidth.toDouble())
-                .coerceIn(0.1, 1.0)
+            val outputScale = (surfaceWidthPx.toDouble() / targetCssWidth.toDouble())
+                .coerceIn(0.1, 10.0)
             val deviceMetrics = JSONObject()
                 .put("width", targetCssWidth)
                 .put("height", targetCssHeight)
                 .put("screenWidth", targetCssWidth)
                 .put("screenHeight", targetCssHeight)
-                .put("deviceScaleFactor", surfaceScale)
+                .put("deviceScaleFactor", 1.0)
+                .put("scale", outputScale)
                 .put("mobile", false)
 
+            // Clear any native page zoom left by a previous tab/site before applying
+            // the desktop viewport. setZoomLevel(0) alone does not reset page scale.
+            target.setZoomLevel(0.0)
             target.executeDevToolsMethod(
                 "Emulation.setDeviceMetricsOverride",
                 deviceMetrics.toString()
-            ) { success, resultJson ->
+            ) metricsCallback@ { success, resultJson ->
                 val currentWindow = browserWindows.firstOrNull {
                     it.id == activeWindowId && it.browser === target && it.desktopMode
-                } ?: return@executeDevToolsMethod
+                } ?: return@metricsCallback
                 if (success) {
-                    // Explicitly neutralize any previous page zoom; DPR performs the fit.
-                    target.setZoomLevel(0.0)
-                    val scaleText = String.format(Locale.ROOT, "%.4f", surfaceScale)
-                    Log.i(
-                        TAG,
-                        "DESKTOP_DEVICE_METRICS_APPLIED window=${currentWindow.id} cssWidth=$targetCssWidth cssHeight=$targetCssHeight deviceScaleFactor=$scaleText mobile=false"
-                    )
-                    Log.i(
-                        TAG,
-                        "DESKTOP_VIEWPORT_ZOOM_APPLIED window=${currentWindow.id} surfaceWidthPx=$surfaceWidthPx surfaceHeightPx=$surfaceHeightPx cssViewportWidth=$targetCssWidth cssViewportHeight=$targetCssHeight deviceScaleFactor=$scaleText zoomLevel=0.0000 targetCssWidth=$targetCssWidth appliedAfterLoad=true"
-                    )
+                    target.executeDevToolsMethod(
+                        "Emulation.resetPageScaleFactor",
+                        "{}"
+                    ) resetCallback@ { resetSuccess, resetResult ->
+                        val stillActive = browserWindows.firstOrNull {
+                            it.id == activeWindowId && it.browser === target && it.desktopMode
+                        } ?: return@resetCallback
+                        target.setZoomLevel(0.0)
+                        val scaleText = String.format(Locale.ROOT, "%.4f", outputScale)
+                        Log.i(
+                            TAG,
+                            "DESKTOP_PAGE_SCALE_RESET window=${stillActive.id} success=$resetSuccess result=${resetResult.orEmpty()}"
+                        )
+                        Log.i(
+                            TAG,
+                            "DESKTOP_DEVICE_METRICS_APPLIED window=${stillActive.id} cssWidth=$targetCssWidth cssHeight=$targetCssHeight deviceScaleFactor=1.0000 outputScale=$scaleText mobile=false"
+                        )
+                        Log.i(
+                            TAG,
+                            "DESKTOP_VIEWPORT_ZOOM_APPLIED window=${stillActive.id} surfaceWidthPx=$surfaceWidthPx surfaceHeightPx=$surfaceHeightPx cssViewportWidth=$targetCssWidth cssViewportHeight=$targetCssHeight deviceScaleFactor=1.0000 outputScale=$scaleText zoomLevel=0.0000 pageScaleReset=$resetSuccess targetCssWidth=$targetCssWidth appliedAfterLoad=true"
+                        )
+                    }
                 } else {
-                    // Keep the existing zoom behavior as a safe fallback if this
-                    // Chromium build refuses the device-metrics command.
+                    // Do not pretend the desktop viewport was applied if Chromium
+                    // rejected it. Retain a legible native zoom fallback and log it.
                     val density = resources.displayMetrics.density.toDouble().coerceAtLeast(0.1)
                     val viewportWidthDp = surfaceWidthPx.toDouble() / density
                     val fallbackFactor = (viewportWidthDp / targetCssWidth.toDouble()).coerceIn(0.1, 1.0)
