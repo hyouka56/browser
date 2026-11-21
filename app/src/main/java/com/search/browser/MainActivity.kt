@@ -454,7 +454,7 @@ class MainActivity : AppCompatActivity() {
                 if (!isLoading) {
                     val isActiveWindow = activeWindowId == windowId
                     if (isActiveWindow) {
-                        if (window.desktopMode) applyDesktopPageScale(instance)
+                        if (window.desktopMode) applyDesktopPageZoom(instance)
                         updateShieldButton()
                         updateDesktopSiteButton()
                     }
@@ -479,6 +479,26 @@ class MainActivity : AppCompatActivity() {
                     }
                     if (BuildConfig.DEBUG && isActiveWindow && !window.incognito) {
                         browserSlot.postDelayed({ captureAndVerifyPage(instance, pageUrl) }, 1000L)
+                        if (window.desktopMode && (pageUrl.startsWith("https://") || pageUrl.startsWith("http://"))) {
+                            browserSlot.postDelayed({
+                                if (activeWindowId == windowId && browser === instance && window.desktopMode) {
+                                    instance.evaluateJavaScript(
+                                        """JSON.stringify({
+                                            readyState: document.readyState,
+                                            title: document.title || "",
+                                            bodyText: (document.body?.innerText || "").trim().slice(0, 240),
+                                            innerWidth: window.innerWidth,
+                                            screenWidth: screen.width,
+                                            devicePixelRatio: window.devicePixelRatio,
+                                            clientWidth: document.documentElement?.clientWidth || 0,
+                                            scrollWidth: document.documentElement?.scrollWidth || 0
+                                        })"""
+                                    ) { result ->
+                                        Log.i(TAG, "DESKTOP_DOM_DIAGNOSTICS window=$windowId result=${result.orEmpty()}")
+                                    }
+                                }
+                            }, 1500L)
+                        }
                         if (intent.getBooleanExtra(EXTRA_TEST_OPEN_HTML_FILE, false) &&
                             isLocalHtmlDocument
                         ) {
@@ -916,7 +936,7 @@ class MainActivity : AppCompatActivity() {
                 val oldWidth = oldRight - oldLeft
                 if (newWidth > 0 && newWidth != oldWidth) {
                     browserWindows.firstOrNull { it.id == activeWindowId && it.desktopMode }
-                        ?.let { applyDesktopPageScale(it.browser) }
+                        ?.let { applyDesktopPageZoom(it.browser) }
                 }
             }
         }
@@ -1181,70 +1201,43 @@ class MainActivity : AppCompatActivity() {
                 userAgentParams.toString(),
                 null
             )
-            val metrics = JSONObject()
-                .put("width", DESKTOP_VIEWPORT_WIDTH)
-                .put("height", DESKTOP_VIEWPORT_HEIGHT)
-                .put("screenWidth", DESKTOP_VIEWPORT_WIDTH)
-                .put("screenHeight", DESKTOP_VIEWPORT_HEIGHT)
-                .put("deviceScaleFactor", 1.0)
-                .put("mobile", false)
-            target.executeDevToolsMethod(
-                "Emulation.setDeviceMetricsOverride",
-                metrics.toString(),
-                null
-            )
-            applyDesktopPageScale(target)
+            // Keep Cefrium's native Surface viewport intact. DeviceMetricsOverride
+            // changes Chromium's virtual screen independently of the Surface size;
+            // on Surface browsers this can leave accessibility/layout bounds at zero.
+            // Native page zoom widens the effective CSS viewport without replacing it.
+            applyDesktopPageZoom(target)
         } else {
             target.setUserAgentOverride(null)
-            target.executeDevToolsMethod(
-                "Emulation.resetPageScaleFactor",
-                "{}",
-                null
-            )
-            target.executeDevToolsMethod(
-                "Emulation.clearDeviceMetricsOverride",
-                "{}",
-                null
-            )
+            target.setZoomLevel(0.0)
         }
     }
 
-    private fun applyDesktopPageScale(target: CefriumBrowser) {
+    private fun applyDesktopPageZoom(target: CefriumBrowser) {
         browserSlot.post {
             val activeWindow = browserWindows.firstOrNull {
                 it.id == activeWindowId && it.browser === target && it.desktopMode
             } ?: return@post
             val viewportWidthPx = browserSlot.width
+            val density = resources.displayMetrics.density.toDouble().coerceAtLeast(0.1)
             if (viewportWidthPx <= 0) {
-                Log.w(TAG, "DESKTOP_PAGE_SCALE_SKIPPED window=${activeWindow.id} widthPx=$viewportWidthPx")
+                Log.w(TAG, "DESKTOP_VIEWPORT_ZOOM_SKIPPED window=${activeWindow.id} widthPx=$viewportWidthPx")
                 return@post
             }
 
-            // Keep a desktop CSS viewport (1280px), but render it into the phone's
-            // physical surface width. setPageScaleFactor is unreliable when the
-            // emulated device is marked non-mobile, so express the fit as DPR instead.
-            val deviceScaleFactor = (viewportWidthPx.toDouble() / DESKTOP_VIEWPORT_WIDTH.toDouble())
+            // Android's native Surface keeps its real device scale factor. Zoom out
+            // until the effective CSS viewport is 1280px wide, instead of overriding
+            // the Surface's screen metrics to a virtual 1280x800 desktop display.
+            val viewportWidthDp = viewportWidthPx.toDouble() / density
+            val zoomFactor = (viewportWidthDp / DESKTOP_VIEWPORT_WIDTH.toDouble())
                 .coerceIn(0.1, 1.0)
-            val metrics = JSONObject()
-                .put("width", DESKTOP_VIEWPORT_WIDTH)
-                .put("height", DESKTOP_VIEWPORT_HEIGHT)
-                .put("screenWidth", DESKTOP_VIEWPORT_WIDTH)
-                .put("screenHeight", DESKTOP_VIEWPORT_HEIGHT)
-                .put("deviceScaleFactor", deviceScaleFactor)
-                .put("mobile", false)
-            target.executeDevToolsMethod(
-                "Emulation.setDeviceMetricsOverride",
-                metrics.toString()
-            ) { success, resultJson ->
-                if (success) {
-                    Log.i(
-                        TAG,
-                        "DESKTOP_VIEWPORT_FIT_APPLIED window=${activeWindow.id} surfaceWidthPx=$viewportWidthPx deviceScaleFactor=$deviceScaleFactor"
-                    )
-                } else {
-                    Log.w(TAG, "DESKTOP_VIEWPORT_FIT_FAILED window=${activeWindow.id} result=$resultJson")
-                }
-            }
+            val zoomLevel = kotlin.math.ln(zoomFactor) / kotlin.math.ln(1.2)
+            target.setZoomLevel(zoomLevel)
+            val factorText = String.format(Locale.ROOT, "%.4f", zoomFactor)
+            val levelText = String.format(Locale.ROOT, "%.4f", zoomLevel)
+            Log.i(
+                TAG,
+                "DESKTOP_VIEWPORT_ZOOM_APPLIED window=${activeWindow.id} surfaceWidthPx=$viewportWidthPx density=$density viewportWidthDp=$viewportWidthDp zoomFactor=$factorText zoomLevel=$levelText"
+            )
         }
     }
 
@@ -1429,7 +1422,7 @@ class MainActivity : AppCompatActivity() {
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT
         ))
-        if (target.desktopMode) applyDesktopPageScale(target.browser)
+        if (target.desktopMode) applyDesktopPageZoom(target.browser)
         rendererErrorPanel.visibility = View.GONE
         lastRequestedUrl = target.url
         if (!target.incognito && target.url.startsWith("http")) lastSuccessfulUrl = target.url

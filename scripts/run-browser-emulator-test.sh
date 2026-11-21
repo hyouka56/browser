@@ -234,18 +234,41 @@ wait_for_log "PAGE_LOAD_STATE loading=false" 1 120
 wait_for_log "DESKTOP_SITE_INITIAL_STATE window=1 enabled=false" 1 30
 tap_accessibility_node_with_system_recovery desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 1 30
-wait_for_log "DESKTOP_VIEWPORT_FIT_APPLIED window=1" 1 30
+wait_for_log "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" 1 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 2 120
+wait_for_log "PAGE_BITMAP_CAPTURED url=https://example.com/" 2 90
+wait_for_log "DESKTOP_DOM_DIAGNOSTICS window=1" 1 30
 if ! dismiss_external_anr_dialog_if_present; then
   echo "Could not safely dismiss an external system ANR before desktop-mode screenshot capture." >&2
   exit 1
 fi
-DESKTOP_SCALE_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_VIEWPORT_FIT_APPLIED window=1" | tail -n1 || true)"
-if [[ ! "$DESKTOP_SCALE_LOG" =~ deviceScaleFactor=0\.[0-9]+ ]]; then
-  echo "Expected desktop mode to fit the 1280px CSS viewport to the phone surface; got: $DESKTOP_SCALE_LOG" >&2
+DESKTOP_ZOOM_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" | tail -n1 || true)"
+if [[ ! "$DESKTOP_ZOOM_LOG" =~ zoomFactor=0\.[0-9]+ ]]; then
+  echo "Expected desktop mode to zoom the 1280px CSS layout to the phone surface; got: $DESKTOP_ZOOM_LOG" >&2
   adb logcat -d -s Browser:V >&2 || true
   exit 1
 fi
+DESKTOP_DOM_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_DOM_DIAGNOSTICS window=1" | tail -n1 || true)"
+python3 - "$DESKTOP_DOM_LOG" <<'PY'
+import json, re, sys
+line = sys.argv[1]
+match = re.search(r"result=(\{.*\})$", line)
+if not match:
+    raise SystemExit(f"Desktop DOM diagnostics did not return JSON: {line}")
+data = json.loads(match.group(1))
+body = data.get("bodyText", "")
+width = int(data.get("innerWidth", 0))
+client = int(data.get("clientWidth", 0))
+scroll = int(data.get("scrollWidth", 0))
+if "Example Domain" not in data.get("title", "") or "Example Domain" not in body:
+    raise SystemExit(f"Desktop page content is missing: {data}")
+if width < 1000 or client < 1000:
+    raise SystemExit(f"Desktop CSS viewport is not wide enough: {data}")
+if scroll > client + 8:
+    raise SystemExit(f"Desktop page still overflows horizontally: {data}")
+print(f"PASS: desktop DOM rendered at {width}px with no horizontal overflow")
+PY
+sleep 1
 adb exec-out screencap -p > "$ARTIFACTS/desktop-site-scaled.png"
 tap_accessibility_node_with_system_recovery desc "Desktop site enabled."
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=false" 1 30
