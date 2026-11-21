@@ -472,7 +472,7 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                     if (isActiveWindow && window.desktopMode && isSupportedWebUrl(pageUrl)) {
-                        applyDesktopViewportScale(instance)
+                        applyDesktopViewportMetrics(instance)
                     }
                     val isLocalHtmlNavigation = window.localHtmlDisplayName != null &&
                         (pageUrl == "about:blank" || pageUrl.startsWith("data:"))
@@ -1347,7 +1347,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun applyDesktopViewportScale(target: CefriumBrowser) {
+    private fun applyDesktopViewportMetrics(target: CefriumBrowser) {
         fun applyWhenSurfaceIsReady(attempt: Int) {
             val activeWindow = browserWindows.firstOrNull {
                 it.id == activeWindowId && it.browser === target && it.desktopMode
@@ -1360,22 +1360,18 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     Log.w(
                         TAG,
-                        "DESKTOP_VIEWPORT_SCALE_SKIPPED window=${activeWindow.id} widthPx=$surfaceWidthPx heightPx=$surfaceHeightPx"
+                        "DESKTOP_VIEWPORT_METRICS_SKIPPED window=${activeWindow.id} widthPx=$surfaceWidthPx heightPx=$surfaceHeightPx"
                     )
                 }
                 return
             }
 
-            // Keep the website's desktop layout in ordinary CSS pixels at DPR 1.
-            // deviceScaleFactor controls CSS/device density; it is NOT the output
-            // image fit factor. Chromium exposes a separate `scale` transform that
-            // fits the resulting desktop view into the actual Android surface.
-            val targetCssWidth = DESKTOP_VIEWPORT_WIDTH
-            val targetCssHeight = Math.round(
-                targetCssWidth.toDouble() * surfaceHeightPx.toDouble() / surfaceWidthPx.toDouble()
-            ).toInt().coerceAtLeast(1)
-            val renderScale = (surfaceWidthPx.toDouble() / targetCssWidth.toDouble())
-                .coerceIn(0.1, 1.0)
+            // Use the actual Chromium surface dimensions as the desktop CSS viewport.
+            // A 1080px Android surface therefore gets a 1080px desktop viewport at DPR 1.
+            // This avoids fractional DPR, compositor output transforms and page zoom: the
+            // desktop layout width and physical surface width match one-to-one.
+            val targetCssWidth = surfaceWidthPx.coerceAtLeast(1)
+            val targetCssHeight = surfaceHeightPx.coerceAtLeast(1)
             val desktopDeviceScaleFactor = 1.0
             val deviceMetrics = JSONObject()
                 .put("width", targetCssWidth)
@@ -1383,7 +1379,6 @@ class MainActivity : AppCompatActivity() {
                 .put("screenWidth", targetCssWidth)
                 .put("screenHeight", targetCssHeight)
                 .put("deviceScaleFactor", desktopDeviceScaleFactor)
-                .put("scale", renderScale)
                 .put("mobile", false)
 
             target.executeDevToolsMethod(
@@ -1395,14 +1390,13 @@ class MainActivity : AppCompatActivity() {
                 } ?: return@executeDevToolsMethod
                 target.setZoomLevel(0.0)
                 if (success) {
-                    val scaleText = String.format(Locale.ROOT, "%.4f", renderScale)
                     Log.i(
                         TAG,
-                        "DESKTOP_DEVICE_METRICS_APPLIED window=${currentWindow.id} cssWidth=$targetCssWidth cssHeight=$targetCssHeight deviceScaleFactor=1.0000 renderScale=$scaleText mobile=false"
+                        "DESKTOP_DEVICE_METRICS_APPLIED window=${currentWindow.id} cssWidth=$targetCssWidth cssHeight=$targetCssHeight deviceScaleFactor=1.0000 mobile=false"
                     )
                     Log.i(
                         TAG,
-                        "DESKTOP_VIEWPORT_SCALE_APPLIED window=${currentWindow.id} surfaceWidthPx=$surfaceWidthPx surfaceHeightPx=$surfaceHeightPx cssViewportWidth=$targetCssWidth cssViewportHeight=$targetCssHeight deviceScaleFactor=1.0000 renderScale=$scaleText zoomLevel=0.0000 appliedAfterLoad=true"
+                        "DESKTOP_VIEWPORT_METRICS_APPLIED window=${currentWindow.id} surfaceWidthPx=$surfaceWidthPx surfaceHeightPx=$surfaceHeightPx cssViewportWidth=$targetCssWidth cssViewportHeight=$targetCssHeight deviceScaleFactor=1.0000 zoomLevel=0.0000 appliedAfterLoad=true"
                     )
                 } else {
                     // Do not fall back to page zoom: it changes layout breakpoints
@@ -2964,7 +2958,6 @@ class MainActivity : AppCompatActivity() {
         const val KEY_BROWSER_STATE = "browser_state"
         const val KEY_LAST_URL = "last_successful_url"
         const val KEY_DESKTOP_SITE = "desktop_site_enabled"
-        const val DESKTOP_VIEWPORT_WIDTH = 1280
         const val DESKTOP_CHROME_MAJOR = "156"
         const val DESKTOP_CHROME_VERSION = "156.0.8078.96"
         const val DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.8078.96 Safari/537.36"

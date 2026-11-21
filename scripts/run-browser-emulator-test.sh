@@ -255,7 +255,7 @@ wait_for_log "DESKTOP_SITE_INITIAL_STATE window=1 enabled=false" 1 30
 wait_for_log "MOBILE_USER_AGENT_BASELINE_CAPTURED window=1" 1 30
 tap_accessibility_node_with_system_recovery desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 1 30
-wait_for_log "DESKTOP_VIEWPORT_SCALE_APPLIED window=1" 1 30
+wait_for_log "DESKTOP_VIEWPORT_METRICS_APPLIED window=1" 1 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 2 120
 wait_for_log "PAGE_BITMAP_CAPTURED url=https://example.com/" 2 90
 wait_for_log "DESKTOP_DOM_DIAGNOSTICS window=1" 1 30
@@ -263,9 +263,9 @@ if ! dismiss_external_anr_dialog_if_present; then
   echo "Could not safely dismiss an external system ANR before desktop-mode screenshot capture." >&2
   exit 1
 fi
-DESKTOP_ZOOM_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_VIEWPORT_SCALE_APPLIED window=1" | tail -n1 || true)"
-if [[ ! "$DESKTOP_ZOOM_LOG" =~ targetCssWidth=1280 ]] || [[ ! "$DESKTOP_ZOOM_LOG" =~ appliedAfterLoad=true ]]; then
-  echo "Expected native page zoom to be applied after navigation for a 1280 CSS-pixel desktop target; got: $DESKTOP_ZOOM_LOG" >&2
+DESKTOP_ZOOM_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_VIEWPORT_METRICS_APPLIED window=1" | tail -n1 || true)"
+if [[ ! "$DESKTOP_ZOOM_LOG" =~ cssViewportWidth=1080 ]] || [[ ! "$DESKTOP_ZOOM_LOG" =~ deviceScaleFactor=1.0000 ]] || [[ ! "$DESKTOP_ZOOM_LOG" =~ appliedAfterLoad=true ]]; then
+  echo "Expected a native-width 1080 CSS-pixel desktop viewport at DPR 1; got: $DESKTOP_ZOOM_LOG" >&2
   adb logcat -d -s Browser:V >&2 || true
   exit 1
 fi
@@ -286,13 +286,13 @@ scroll = int(data.get("scrollWidth", 0))
 dpr = float(data.get("devicePixelRatio", 0))
 if "Example Domain" not in data.get("title", "") or "This domain is for use in documentation examples" not in body:
     raise SystemExit(f"Desktop page content is missing: {data}")
-if width < 768 or client < 768:
-    raise SystemExit(f"Desktop CSS viewport did not reach the wide layout breakpoint: {data}")
+if abs(width - 1080) > 8 or abs(client - 1080) > 8:
+    raise SystemExit(f"Desktop CSS viewport must match the 1080px physical surface: {data}")
 if scroll > client + 8:
     raise SystemExit(f"Desktop page still overflows horizontally: {data}")
 if abs(dpr - 1.0) > 0.02:
     raise SystemExit(f"Desktop DPR must remain 1.0; physical fit must use the compositor image scale: {data}")
-print(f"PASS: desktop page content rendered at {width}px, DPR={dpr}, with no horizontal overflow after Chromium compositor scaling was applied")
+print(f"PASS: desktop page content rendered at {width}px, DPR={dpr}, with no horizontal overflow at the native 1080px surface width")
 PY
 sleep 1
 adb exec-out screencap -p > "$ARTIFACTS/desktop-site-scaled.png"
@@ -349,7 +349,7 @@ printf 'PASS: Google search page loaded in mobile mode before the PC-mode test; 
 tap_accessibility_node_with_system_recovery desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 2 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 5 120
-wait_for_log "DESKTOP_VIEWPORT_SCALE_APPLIED window=1" 2 45
+wait_for_log "DESKTOP_VIEWPORT_METRICS_APPLIED window=1" 2 45
 wait_for_log "DESKTOP_DOM_DIAGNOSTICS window=1" 2 45
 sleep 3
 if ! dismiss_external_anr_dialog_if_present; then
@@ -458,7 +458,7 @@ tap_accessibility_node_with_system_recovery desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 3 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 8 120
 wait_for_log "DESKTOP_DEVICE_METRICS_APPLIED window=1" 3 45
-wait_for_log "DESKTOP_VIEWPORT_SCALE_APPLIED window=1" 3 45
+wait_for_log "DESKTOP_VIEWPORT_METRICS_APPLIED window=1" 3 45
 wait_for_log "DESKTOP_DOM_DIAGNOSTICS window=1" 3 45
 sleep 4
 if ! dismiss_external_anr_dialog_if_present; then
@@ -491,12 +491,12 @@ if not title.strip() or not body.strip() or "github" not in title.lower() and "b
     print(f"FAIL: GitHub repository page did not render in PC mode: {data}")
 else:
     print(f"PASS: GitHub repository page loaded in PC mode; title={title!r}, innerWidth={inner}px, client={client}px, documentScroll={doc_scroll}px, bodyScroll={body_scroll}px, bodyRect={body_rect}px, documentRect={doc_rect}px, visualScale={data.get('visualViewportScale')}")
-if not 1200 <= inner <= 1360 or not 1200 <= client <= 1360:
-    print(f"FAIL: GitHub CSS viewport is not close to the requested 1280px: innerWidth={inner}, clientWidth={client}")
+if abs(inner - 1080) > 8 or abs(client - 1080) > 8:
+    print(f"FAIL: GitHub CSS viewport must match the 1080px physical surface: innerWidth={inner}, clientWidth={client}")
 else:
-    print(f"PASS: GitHub CSS viewport is {inner}px, close to the requested 1280px.")
+    print(f"PASS: GitHub CSS viewport is {inner}px and matches the 1080px physical surface.")
 if abs(dpr - 1.0) > 0.02:
-    print(f"FAIL: desktop DPR is not 1.0; image fit must be handled by compositor scale: {dpr}")
+    print(f"FAIL: desktop DPR is not 1.0; the CSS viewport must match the physical surface width: {dpr}")
 else:
     print(f"PASS: desktop DPR remains 1.0; physical image scaling is separate ({data.get('visualViewportScale')}).")
 # A full-width desktop layout must keep the repo's main content near the left edge.
@@ -1058,7 +1058,7 @@ report = {
         "cefrium_chromium_engine_logged": "CEF_ENGINE version=0.21.0 chromium=156.0.8078.96" in log,
         "page_title_verified": "PAGE_TITLE window=1 title=Example Domain" in log,
         "page_load_completed": "PAGE_LOAD_STATE loading=false" in log,
-        "desktop_page_content_rendered_without_horizontal_overflow": "PASS: desktop page content rendered at" in desktop_site_results and "with no horizontal overflow after Chromium compositor scaling was applied" in desktop_site_results,
+        "desktop_page_content_rendered_without_horizontal_overflow": "PASS: desktop page content rendered at" in desktop_site_results and "with no horizontal overflow at the native 1080px surface width" in desktop_site_results,
         "mobile_css_viewport_restored_after_disabling_desktop_mode": "PASS: mobile CSS viewport restored to" in desktop_site_results,
         "mobile_user_agent_restored_after_disabling_desktop_mode": "PASS: Android mobile user-agent, Android navigator.platform, and mobile UA metadata restored after disabling PC mode" in desktop_site_results,
         "google_desktop_search_page_rendered_in_pc_mode": (
@@ -1087,9 +1087,9 @@ report = {
         "github_desktop_repository_has_no_horizontal_overflow": (
             "PASS: GitHub desktop repository page has no horizontal document/body overflow." in desktop_site_results
         ),
-        "github_desktop_css_viewport_is_near_1280px": (
+        "github_desktop_css_viewport_matches_1080px_surface": (
             "PASS: GitHub CSS viewport is" in desktop_site_results and
-            "close to the requested 1280px" in desktop_site_results
+            "matches the 1080px physical surface" in desktop_site_results
         ),
         "desktop_device_pixel_ratio_is_one": (
             "PASS: desktop DPR remains 1.0" in desktop_site_results
