@@ -1146,4 +1146,39 @@ report = {
         "activity_close_deferred_for_download": "BROWSER_CLOSE_DEFERRED_FOR_DOWNLOAD" in log,
         "browser_task_removed_during_download": "DOWNLOAD_KEEP_ALIVE_TASK_REMOVED" in log,
         "background_download_finished_after_task_removal": "DOWNLOAD_FILE_SAVED name=download-background-test.txt" in log and (folder / "background-download-after-task-removal.txt").is_file(),
-       
+        "foreground_service_stopped_after_download": "DOWNLOAD_KEEP_ALIVE_SERVICE_STOPPED" in log,
+        "browser_closed_after_download": "BROWSER_CLOSED_AFTER_DOWNLOAD" in log,
+        "easylist_loaded_with_positive_rule_count": (
+            field_int(enabled_default, "EasyListRules") > 0 and
+            field_int(disabled_persisted, "EasyListRules") > 0 and
+            field_int(enabled_restored, "EasyListRules") > 0
+        ),
+        "known_ad_request_blocked_when_enabled": (
+            field_int(enabled_default, "blockedRequests") > 0 and
+            "allowedSameOrigin=true" in enabled_default
+        ),
+        "normal_same_origin_request_remains_allowed": (
+            "allowedSameOrigin=true" in enabled_default and
+            "allowedSameOrigin=true" in disabled_persisted and
+            "allowedSameOrigin=true" in enabled_restored
+        ),
+        "disabled_ad_block_state_persists_and_does_not_block": (
+            field_int(disabled_persisted, "blockedRequests") == 0
+        ),
+        "ad_blocking_restored_after_reenable": (
+            field_int(enabled_restored, "blockedRequests") > 0
+        ),
+        "shield_toggle_updates_every_open_window": (
+            "PASS: shield toggle updated both open browser windows." in adblock_result_lines
+        ),
+    },
+}
+report["result"] = "PASS" if all(report["checks"].values()) else "FAIL"
+(folder / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+print(json.dumps(report, indent=2))
+if report["result"] != "PASS":
+    raise SystemExit(1)
+PY
+
+echo "PASS: API $EXPECTED_API rendered Example Domain with native website colors and dark app chrome, recovered Chromium, and completed download checks." | tee "$ARTIFACTS/result.txt"
+echo "PASS: API $EXPECTED_API - readable dark app chrome, unchanged website colors, Chromium recovery, downloads, notifications, and background download continuation." >> "$GITHUB_STEP_SUMMARY"

@@ -2965,4 +2965,19 @@ class MainActivity : AppCompatActivity() {
         const val KEY_LAST_URL = "last_successful_url"
         const val KEY_DESKTOP_SITE = "desktop_site_enabled"
         const val DESKTOP_VIEWPORT_WIDTH = 1280
-        const val DESKTOP_CHROME_MAJ
+        const val DESKTOP_CHROME_MAJOR = "156"
+        const val DESKTOP_CHROME_VERSION = "156.0.8078.96"
+        const val DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.8078.96 Safari/537.36"
+        const val KEY_NOTIFICATION_PERMISSION_ASKED = "download_notification_permission_asked"
+        const val EXTRA_TEST_URL = "com.search.browser.TEST_URL"
+        const val EXTRA_TEST_DOWNLOAD_PAGE = "com.search.browser.TEST_DOWNLOAD_PAGE"
+        const val EXTRA_SHOW_DOWNLOADS = "com.search.browser.SHOW_DOWNLOADS"
+        const val EXTRA_TEST_CRASH_RENDERER = "com.search.browser.TEST_CRASH_RENDERER"
+        const val EXTRA_TEST_ADBLOCK_PAGE = "com.search.browser.TEST_ADBLOCK_PAGE"
+        const val EXTRA_TEST_ADBLOCK_MULTIWINDOW = "com.search.browser.TEST_ADBLOCK_MULTIWINDOW"
+        const val EXTRA_TEST_OPEN_HTML_FILE = "com.search.browser.TEST_OPEN_HTML_FILE"
+        const val BACKGROUND_DOWNLOAD_TEST_FILE = "download-background-test.txt"
+        const val BACKGROUND_DOWNLOAD_TEST_DELAY_MS = 8_000L
+        const val TAG = "Browser"
+    }
+}
