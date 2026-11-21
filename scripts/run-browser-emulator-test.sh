@@ -234,7 +234,7 @@ wait_for_log "PAGE_LOAD_STATE loading=false" 1 120
 wait_for_log "DESKTOP_SITE_INITIAL_STATE window=1 enabled=false" 1 30
 tap_accessibility_node_with_system_recovery desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 1 30
-wait_for_log "DESKTOP_VIEWPORT_LAYOUT_SCRIPT_INSTALLED window=1" 1 30
+wait_for_log "DESKTOP_VIEWPORT_METRICS_APPLIED window=1" 1 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 2 120
 wait_for_log "PAGE_BITMAP_CAPTURED url=https://example.com/" 2 90
 wait_for_log "DESKTOP_DOM_DIAGNOSTICS window=1" 1 30
@@ -242,9 +242,9 @@ if ! dismiss_external_anr_dialog_if_present; then
   echo "Could not safely dismiss an external system ANR before desktop-mode screenshot capture." >&2
   exit 1
 fi
-DESKTOP_LAYOUT_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_VIEWPORT_LAYOUT_SCRIPT_INSTALLED window=1" | tail -n1 || true)"
-if [[ ! "$DESKTOP_LAYOUT_LOG" =~ targetCssWidth=1280 ]]; then
-  echo "Expected desktop mode to install its 1280px layout viewport before page scripts; got: $DESKTOP_LAYOUT_LOG" >&2
+DESKTOP_METRICS_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_VIEWPORT_METRICS_APPLIED window=1" | tail -n1 || true)"
+if [[ ! "$DESKTOP_METRICS_LOG" =~ cssWidth=1280 ]] || [[ ! "$DESKTOP_METRICS_LOG" =~ dontSetVisibleSize=true ]]; then
+  echo "Expected desktop-mode metrics to fit 1280 CSS pixels without resizing the native Surface; got: $DESKTOP_METRICS_LOG" >&2
   adb logcat -d -s Browser:V >&2 || true
   exit 1
 fi
@@ -268,8 +268,10 @@ if width < 1200 or client < 1200:
     raise SystemExit(f"Desktop CSS viewport is not wide enough for the 1280px target: {data}")
 if width > 1360 or client > 1360:
     raise SystemExit(f"Desktop CSS viewport was over-corrected: {data}")
-if "width=1280" not in data.get("viewportMeta", ""):
-    raise SystemExit(f"Desktop viewport meta was not applied before page layout: {data}")
+dpr = float(data.get("devicePixelRatio", 0))
+screen = int(data.get("screenWidth", 0))
+if screen < 1200 or not 0.1 <= dpr <= 1.0:
+    raise SystemExit(f"Desktop emulated screen/DPR was not applied: {data}")
 if scroll > client + 8:
     raise SystemExit(f"Desktop page still overflows horizontally: {data}")
 print(f"PASS: desktop DOM rendered at {width}px with no horizontal overflow")
@@ -279,6 +281,16 @@ adb exec-out screencap -p > "$ARTIFACTS/desktop-site-scaled.png"
 tap_accessibility_node_with_system_recovery desc "Desktop site enabled."
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=false" 1 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 3 120
+wait_for_log "MOBILE_VIEWPORT_METRICS_CLEARED window=1" 1 30
+wait_for_log "MOBILE_VIEWPORT_DIAGNOSTICS window=1 innerWidth=" 2 30
+MOBILE_DOM_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "MOBILE_VIEWPORT_DIAGNOSTICS window=1" | tail -n1 || true)"
+python3 - "$MOBILE_DOM_LOG" <<'PY'
+import re, sys
+match = re.search(r"innerWidth=(\d+)", sys.argv[1])
+if not match or int(match.group(1)) > 600:
+    raise SystemExit(f"Mobile CSS viewport was not restored after disabling desktop mode: {sys.argv[1]}")
+print(f"PASS: mobile CSS viewport restored to {match.group(1)}px")
+PY
 printf 'PASS: PC control switched desktop mode on and back to mobile mode.\n' | tee "$ARTIFACTS/desktop-site-results.txt"
 
 # A normal launch must open Android's default-browser chooser without a toolbar button.

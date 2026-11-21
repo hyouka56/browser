@@ -94,7 +94,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var windowsButton: TextView
 
     private val browserWindows = mutableListOf<BrowserWindow>()
-    private val desktopViewportScripts = java.util.WeakHashMap<CefriumBrowser, CefriumBrowser.ScriptHandler>()
     private val downloadBrowserOwners = LinkedHashMap<Int, CefriumBrowser>()
     private val privateDownloadIds = mutableSetOf<Int>()
     private var activeWindowId = -1
@@ -492,13 +491,26 @@ class MainActivity : AppCompatActivity() {
                                             devicePixelRatio: window.devicePixelRatio,
                                             clientWidth: document.documentElement?.clientWidth || 0,
                                             scrollWidth: document.documentElement?.scrollWidth || 0,
-                                            viewportMeta: document.querySelector('meta[name="viewport" i]')?.getAttribute("content") || ""
+                                            visualViewportWidth: Math.round(window.visualViewport?.width || 0),
+                                            screenHeight: screen.height
                                         })"""
                                     ) { result ->
                                         Log.i(TAG, "DESKTOP_DOM_DIAGNOSTICS window=$windowId result=${result.orEmpty()}")
                                     }
                                 }
                             }, 2500L)
+                        }
+                        if (!window.desktopMode && (pageUrl.startsWith("https://") || pageUrl.startsWith("http://"))) {
+                            browserSlot.postDelayed({
+                                if (activeWindowId == windowId && browser === instance && !window.desktopMode) {
+                                    instance.evaluateJavaScript("window.innerWidth") { result ->
+                                        Log.i(
+                                            TAG,
+                                            "MOBILE_VIEWPORT_DIAGNOSTICS window=$windowId innerWidth=${result.orEmpty()}"
+                                        )
+                                    }
+                                }
+                            }, 1200L)
                         }
                         if (intent.getBooleanExtra(EXTRA_TEST_OPEN_HTML_FILE, false) &&
                             isLocalHtmlDocument
@@ -1194,17 +1206,81 @@ class MainActivity : AppCompatActivity() {
                 userAgentParams.toString(),
                 null
             )
-            if (!desktopViewportScripts.containsKey(target)) {
-                val handler = target.addDocumentStartJavaScript(DESKTOP_VIEWPORT_SCRIPT, setOf("*"))
-                desktopViewportScripts[target] = handler
-                val activeWindow = browserWindows.firstOrNull { it.browser === target }
-                Log.i(
-                    TAG,
-                    "DESKTOP_VIEWPORT_LAYOUT_SCRIPT_INSTALLED window=${activeWindow?.id ?: -1} targetCssWidth=$DESKTOP_VIEWPORT_WIDTH"
-                )
-            }
+            applyDesktopViewportMetrics(target)
         } else {
             target.setUserAgentOverride(null)
+            target.executeDevToolsMethod("Emulation.clearDeviceMetricsOverride", "{}") { success, resultJson ->
+                val activeWindow = browserWindows.firstOrNull { it.browser === target }
+                if (success) {
+                    Log.i(TAG, "MOBILE_VIEWPORT_METRICS_CLEARED window=${activeWindow?.id ?: -1}")
+                } else {
+                    Log.w(TAG, "MOBILE_VIEWPORT_METRICS_CLEAR_FAILED window=${activeWindow?.id ?: -1} result=$resultJson")
+                }
+            }
+        }
+    }
+
+    private fun applyDesktopViewportMetrics(target: CefriumBrowser) {
+        fun applyWhenSurfaceIsReady(attempt: Int) {
+            val activeWindow = browserWindows.firstOrNull {
+                it.id == activeWindowId && it.browser === target && it.desktopMode
+            } ?: return
+            val surfaceWidthPx = browserSlot.width
+            val surfaceHeightPx = browserSlot.height
+            if (surfaceWidthPx <= 0 || surfaceHeightPx <= 0) {
+                if (attempt < 8) {
+                    browserSlot.postDelayed({ applyWhenSurfaceIsReady(attempt + 1) }, 100L)
+                } else {
+                    Log.w(
+                        TAG,
+                        "DESKTOP_VIEWPORT_METRICS_SKIPPED window=${activeWindow.id} surfaceWidthPx=$surfaceWidthPx surfaceHeightPx=$surfaceHeightPx"
+                    )
+                }
+                return
+            }
+
+            // Fit a 1280 CSS-pixel desktop layout into the existing Surface. The DPR
+            // maps 1280 CSS pixels to the Surface's physical width. dontSetVisibleSize
+            // deliberately leaves the native Surface bounds untouched (unlike the
+            // earlier full DeviceMetricsOverride which could blank Surface rendering).
+            val desktopCssWidth = maxOf(DESKTOP_VIEWPORT_WIDTH, surfaceWidthPx)
+            val deviceScaleFactor = (surfaceWidthPx.toDouble() / desktopCssWidth.toDouble())
+                .coerceIn(0.1, 1.0)
+            val desktopCssHeight = kotlin.math.ceil(surfaceHeightPx.toDouble() / deviceScaleFactor).toInt()
+            val metrics = JSONObject()
+                .put("width", desktopCssWidth)
+                .put("height", desktopCssHeight)
+                .put("screenWidth", desktopCssWidth)
+                .put("screenHeight", desktopCssHeight)
+                .put("deviceScaleFactor", deviceScaleFactor)
+                .put("mobile", false)
+                .put("dontSetVisibleSize", true)
+            target.executeDevToolsMethod(
+                "Emulation.setDeviceMetricsOverride",
+                metrics.toString()
+            ) { success, resultJson ->
+                val scaleText = String.format(Locale.ROOT, "%.4f", deviceScaleFactor)
+                if (success) {
+                    Log.i(
+                        TAG,
+                        "DESKTOP_VIEWPORT_METRICS_APPLIED window=${activeWindow.id} surfaceWidthPx=$surfaceWidthPx surfaceHeightPx=$surfaceHeightPx cssWidth=$desktopCssWidth cssHeight=$desktopCssHeight deviceScaleFactor=$scaleText dontSetVisibleSize=true"
+                    )
+                } else {
+                    Log.w(
+                        TAG,
+                        "DESKTOP_VIEWPORT_METRICS_FAILED window=${activeWindow.id} surfaceWidthPx=$surfaceWidthPx result=$resultJson"
+                    )
+                }
+            }
+        }
+
+        // During an explicit PC-mode toggle the Surface is already measured, so send
+        // the metrics command immediately before the subsequent loadUrl call. Restored
+        // desktop tabs can arrive before layout; in that case wait for their first size.
+        if (browserSlot.width > 0 && browserSlot.height > 0) {
+            applyWhenSurfaceIsReady(0)
+        } else {
+            browserSlot.post { applyWhenSurfaceIsReady(0) }
         }
     }
 
@@ -2746,40 +2822,6 @@ class MainActivity : AppCompatActivity() {
         const val KEY_LAST_URL = "last_successful_url"
         const val KEY_DESKTOP_SITE = "desktop_site_enabled"
         const val DESKTOP_VIEWPORT_WIDTH = 1280
-        private val DESKTOP_VIEWPORT_SCRIPT = """
-            (() => {
-                if (window.top !== window) return;
-                const desktopUserAgent = /Windows NT 10\.0; Win64; x64/.test(navigator.userAgent) &&
-                    navigator.platform === "Win32";
-                if (!desktopUserAgent) return;
-
-                const viewportContent = "width=__DESKTOP_WIDTH__, initial-scale=1.0";
-                const applyDesktopViewport = () => {
-                    if (!document.head) return;
-                    let viewport = Array.from(document.head.querySelectorAll("meta[name]")).find(
-                        (meta) => (meta.getAttribute("name") || "").toLowerCase() === "viewport"
-                    );
-                    if (!viewport) {
-                        viewport = document.createElement("meta");
-                        viewport.setAttribute("name", "viewport");
-                        document.head.insertBefore(viewport, document.head.firstChild);
-                    }
-                    if (viewport.getAttribute("content") !== viewportContent) {
-                        viewport.setAttribute("content", viewportContent);
-                    }
-                };
-
-                const observer = new MutationObserver(applyDesktopViewport);
-                observer.observe(document, {
-                    childList: true,
-                    subtree: true,
-                    attributes: true,
-                    attributeFilter: ["name", "content"]
-                });
-                applyDesktopViewport();
-            })();
-        """.trimIndent().replace("__DESKTOP_WIDTH__", DESKTOP_VIEWPORT_WIDTH.toString())
-        const val DESKTOP_VIEWPORT_HEIGHT = 800
         const val DESKTOP_CHROME_MAJOR = "156"
         const val DESKTOP_CHROME_VERSION = "156.0.8078.96"
         const val DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.8078.96 Safari/537.36"
