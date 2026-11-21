@@ -12,8 +12,8 @@ android {
         applicationId = "com.search.browser"
         minSdk = 29
         targetSdk = 36
-        versionCode = 19
-        versionName = "1.0.18"
+        versionCode = 20
+        versionName = "1.0.19"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

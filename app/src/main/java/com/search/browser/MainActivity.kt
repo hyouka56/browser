@@ -94,10 +94,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var windowsButton: TextView
 
     private val browserWindows = mutableListOf<BrowserWindow>()
+    private val desktopViewportScripts = java.util.WeakHashMap<CefriumBrowser, CefriumBrowser.ScriptHandler>()
     private val downloadBrowserOwners = LinkedHashMap<Int, CefriumBrowser>()
     private val privateDownloadIds = mutableSetOf<Int>()
     private var activeWindowId = -1
-    private var desktopZoomCalibrationGeneration = 0
     private var nextWindowId = 1
     private var browserToCloseAfterDownload: CefriumBrowser? = null
 
@@ -455,7 +455,6 @@ class MainActivity : AppCompatActivity() {
                 if (!isLoading) {
                     val isActiveWindow = activeWindowId == windowId
                     if (isActiveWindow) {
-                        if (window.desktopMode) applyDesktopPageZoom(instance)
                         updateShieldButton()
                         updateDesktopSiteButton()
                     }
@@ -492,7 +491,8 @@ class MainActivity : AppCompatActivity() {
                                             screenWidth: screen.width,
                                             devicePixelRatio: window.devicePixelRatio,
                                             clientWidth: document.documentElement?.clientWidth || 0,
-                                            scrollWidth: document.documentElement?.scrollWidth || 0
+                                            scrollWidth: document.documentElement?.scrollWidth || 0,
+                                            viewportMeta: document.querySelector('meta[name="viewport" i]')?.getAttribute("content") || ""
                                         })"""
                                     ) { result ->
                                         Log.i(TAG, "DESKTOP_DOM_DIAGNOSTICS window=$windowId result=${result.orEmpty()}")
@@ -932,14 +932,6 @@ class MainActivity : AppCompatActivity() {
         // Let Cefrium own browser gestures. Its native refresh only fires at the web-page top.
         browserSlot = FrameLayout(this).apply {
             setBackgroundColor(Color.WHITE)
-            addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
-                val newWidth = right - left
-                val oldWidth = oldRight - oldLeft
-                if (newWidth > 0 && newWidth != oldWidth) {
-                    browserWindows.firstOrNull { it.id == activeWindowId && it.desktopMode }
-                        ?.let { applyDesktopPageZoom(it.browser) }
-                }
-            }
         }
         content.addView(browserSlot, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
@@ -1202,103 +1194,17 @@ class MainActivity : AppCompatActivity() {
                 userAgentParams.toString(),
                 null
             )
-            // Keep Cefrium's native Surface viewport intact. DeviceMetricsOverride
-            // changes Chromium's virtual screen independently of the Surface size;
-            // on Surface browsers this can leave accessibility/layout bounds at zero.
-            // Native page zoom widens the effective CSS viewport without replacing it.
-            applyDesktopPageZoom(target)
+            if (!desktopViewportScripts.containsKey(target)) {
+                val handler = target.addDocumentStartJavaScript(DESKTOP_VIEWPORT_SCRIPT, setOf("*"))
+                desktopViewportScripts[target] = handler
+                val activeWindow = browserWindows.firstOrNull { it.browser === target }
+                Log.i(
+                    TAG,
+                    "DESKTOP_VIEWPORT_LAYOUT_SCRIPT_INSTALLED window=${activeWindow?.id ?: -1} targetCssWidth=$DESKTOP_VIEWPORT_WIDTH"
+                )
+            }
         } else {
-            desktopZoomCalibrationGeneration++
             target.setUserAgentOverride(null)
-            target.setZoomLevel(0.0)
-        }
-    }
-
-    private fun applyDesktopPageZoom(target: CefriumBrowser) {
-        browserSlot.post {
-            val activeWindow = browserWindows.firstOrNull {
-                it.id == activeWindowId && it.browser === target && it.desktopMode
-            } ?: return@post
-            val viewportWidthPx = browserSlot.width
-            val density = resources.displayMetrics.density.toDouble().coerceAtLeast(0.1)
-            if (viewportWidthPx <= 0) {
-                Log.w(TAG, "DESKTOP_VIEWPORT_ZOOM_SKIPPED window=${activeWindow.id} widthPx=$viewportWidthPx")
-                return@post
-            }
-
-            // Keep the Surface's real device metrics. Start with a native page zoom,
-            // then calibrate against Chromium's measured CSS viewport because Surface
-            // density, insets and platform scaling can differ from the nominal density.
-            val calibrationGeneration = ++desktopZoomCalibrationGeneration
-            val targetCssWidth = DESKTOP_VIEWPORT_WIDTH.toDouble()
-            val viewportWidthDp = viewportWidthPx.toDouble() / density
-            val zoomFactor = (viewportWidthDp / targetCssWidth).coerceIn(0.1, 1.0)
-            val initialZoomLevel = kotlin.math.ln(zoomFactor) / kotlin.math.ln(1.2)
-            target.setZoomLevel(initialZoomLevel)
-            val factorText = String.format(Locale.ROOT, "%.4f", zoomFactor)
-            val levelText = String.format(Locale.ROOT, "%.4f", initialZoomLevel)
-            Log.i(
-                TAG,
-                "DESKTOP_VIEWPORT_ZOOM_APPLIED window=${activeWindow.id} surfaceWidthPx=$viewportWidthPx density=$density viewportWidthDp=$viewportWidthDp zoomFactor=$factorText zoomLevel=$levelText targetCssWidth=$targetCssWidth"
-            )
-
-            fun isCurrentCalibration(): Boolean =
-                calibrationGeneration == desktopZoomCalibrationGeneration &&
-                    activeWindowId == activeWindow.id &&
-                    browser === target &&
-                    browserWindows.any { it.id == activeWindow.id && it.browser === target && it.desktopMode }
-
-            fun verifyAndCalibrate(attempt: Int, currentZoomLevel: Double) {
-                browserSlot.postDelayed({
-                    if (isCurrentCalibration()) {
-                        target.evaluateJavaScript("window.innerWidth") { result ->
-                            val measuredWidth = result.orEmpty().trim().trim('"').toDoubleOrNull()
-                            if (measuredWidth == null || measuredWidth <= 0.0) {
-                                Log.w(
-                                    TAG,
-                                    "DESKTOP_VIEWPORT_ZOOM_MEASURE_FAILED window=${activeWindow.id} attempt=$attempt result=${result.orEmpty()}"
-                                )
-                            } else {
-                                val errorRatio = measuredWidth / targetCssWidth
-                                if (kotlin.math.abs(errorRatio - 1.0) <= 0.02) {
-                                    val measuredText = String.format(Locale.ROOT, "%.2f", measuredWidth)
-                                    Log.i(
-                                        TAG,
-                                        "DESKTOP_VIEWPORT_ZOOM_CALIBRATED window=${activeWindow.id} cssWidth=$measuredText targetCssWidth=$targetCssWidth attempts=$attempt"
-                                    )
-                                } else if (attempt >= 2) {
-                                    val measuredText = String.format(Locale.ROOT, "%.2f", measuredWidth)
-                                    Log.w(
-                                        TAG,
-                                        "DESKTOP_VIEWPORT_ZOOM_CALIBRATION_INCOMPLETE window=${activeWindow.id} cssWidth=$measuredText targetCssWidth=$targetCssWidth attempts=$attempt"
-                                    )
-                                } else {
-                                    // CSS viewport width is inversely proportional to the
-                                    // native zoom factor (1.2^level). Correct from the
-                                    // measured value instead of assuming density is exact.
-                                    val correctionLevel = kotlin.math.ln(errorRatio) / kotlin.math.ln(1.2)
-                                    val correctedZoomLevel = (currentZoomLevel + correctionLevel).coerceIn(-10.0, 0.0)
-                                    browserSlot.post {
-                                        if (isCurrentCalibration()) {
-                                            target.setZoomLevel(correctedZoomLevel)
-                                            val measuredText = String.format(Locale.ROOT, "%.2f", measuredWidth)
-                                            val correctionText = String.format(Locale.ROOT, "%.4f", correctionLevel)
-                                            val correctedText = String.format(Locale.ROOT, "%.4f", correctedZoomLevel)
-                                            Log.i(
-                                                TAG,
-                                                "DESKTOP_VIEWPORT_ZOOM_CALIBRATION_APPLIED window=${activeWindow.id} measuredCssWidth=$measuredText targetCssWidth=$targetCssWidth correctionLevel=$correctionText zoomLevel=$correctedText attempt=${attempt + 1}"
-                                            )
-                                            verifyAndCalibrate(attempt + 1, correctedZoomLevel)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }, 450L)
-            }
-
-            verifyAndCalibrate(0, initialZoomLevel)
         }
     }
 
@@ -1483,7 +1389,6 @@ class MainActivity : AppCompatActivity() {
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT
         ))
-        if (target.desktopMode) applyDesktopPageZoom(target.browser)
         rendererErrorPanel.visibility = View.GONE
         lastRequestedUrl = target.url
         if (!target.incognito && target.url.startsWith("http")) lastSuccessfulUrl = target.url
@@ -2841,6 +2746,39 @@ class MainActivity : AppCompatActivity() {
         const val KEY_LAST_URL = "last_successful_url"
         const val KEY_DESKTOP_SITE = "desktop_site_enabled"
         const val DESKTOP_VIEWPORT_WIDTH = 1280
+        private val DESKTOP_VIEWPORT_SCRIPT = """
+            (() => {
+                if (window.top !== window) return;
+                const desktopUserAgent = /Windows NT 10\.0; Win64; x64/.test(navigator.userAgent) &&
+                    navigator.platform === "Win32";
+                if (!desktopUserAgent) return;
+
+                const viewportContent = "width=__DESKTOP_WIDTH__, initial-scale=1.0";
+                const applyDesktopViewport = () => {
+                    if (!document.head) return;
+                    let viewport = Array.from(document.head.querySelectorAll("meta[name]")).find(
+                        (meta) => (meta.getAttribute("name") || "").toLowerCase() === "viewport"
+                    );
+                    if (!viewport) {
+                        viewport = document.createElement("meta");
+                        viewport.setAttribute("name", "viewport");
+                        document.head.insertBefore(viewport, document.head.firstChild);
+                    }
+                    if (viewport.getAttribute("content") !== viewportContent) {
+                        viewport.setAttribute("content", viewportContent);
+                    }
+                };
+
+                const observer = new MutationObserver(applyDesktopViewport);
+                observer.observe(document, {
+                    childList: true,
+                    subtree: true,
+                    attributes: true,
+                    attributeFilter: ["name", "content"]
+                });
+                applyDesktopViewport();
+            })();
+        """.trimIndent().replace("__DESKTOP_WIDTH__", DESKTOP_VIEWPORT_WIDTH.toString())
         const val DESKTOP_VIEWPORT_HEIGHT = 800
         const val DESKTOP_CHROME_MAJOR = "156"
         const val DESKTOP_CHROME_VERSION = "156.0.8078.96"
