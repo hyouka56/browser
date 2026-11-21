@@ -200,17 +200,31 @@ if [[ "$ROLE_PICKER_VISIBLE" != "true" ]]; then
   cat "$ROLE_PICKER_DUMP" >&2
   exit 1
 fi
-# On slow emulator boots, BACK must not be sent before the chooser is actually foregrounded.
+# Dismiss the real system dialog through its visible Cancel action. Some Android versions
+# keep RequestRoleActivity resumed when BACK is sent, even though the dialog exposes Cancel.
 ROLE_PICKER_DISMISSED=false
-for attempt in $(seq 1 8); do
-  adb shell input keyevent KEYCODE_BACK
-  sleep 1
-  adb shell dumpsys activity activities > "$ARTIFACTS/default-browser-role-picker-after-cancel.txt" 2>&1
-  if ! role_picker_is_resumed "$ARTIFACTS/default-browser-role-picker-after-cancel.txt"; then
-    ROLE_PICKER_DISMISSED=true
-    break
-  fi
-done
+if tap_accessibility_node text "Cancel"; then
+  for attempt in $(seq 1 15); do
+    sleep 1
+    adb shell dumpsys activity activities > "$ARTIFACTS/default-browser-role-picker-after-cancel.txt" 2>&1
+    if ! role_picker_is_resumed "$ARTIFACTS/default-browser-role-picker-after-cancel.txt"; then
+      ROLE_PICKER_DISMISSED=true
+      break
+    fi
+  done
+fi
+# Retain a bounded BACK fallback for system UI variants without an accessible Cancel node.
+if [[ "$ROLE_PICKER_DISMISSED" != "true" ]]; then
+  for attempt in $(seq 1 5); do
+    adb shell input keyevent KEYCODE_BACK
+    sleep 1
+    adb shell dumpsys activity activities > "$ARTIFACTS/default-browser-role-picker-after-cancel.txt" 2>&1
+    if ! role_picker_is_resumed "$ARTIFACTS/default-browser-role-picker-after-cancel.txt"; then
+      ROLE_PICKER_DISMISSED=true
+      break
+    fi
+  done
+fi
 if [[ "$ROLE_PICKER_DISMISSED" != "true" ]]; then
   echo "Android's browser-role chooser remained in the foreground after BACK." >&2
   cat "$ARTIFACTS/default-browser-role-picker-after-cancel.txt" >&2

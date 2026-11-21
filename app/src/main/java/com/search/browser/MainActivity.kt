@@ -419,13 +419,16 @@ class MainActivity : AppCompatActivity() {
 
         instance.setNavigationClient(object : CefriumNavigationClient {
             override fun onUrlChanged(browser: CefriumBrowser, url: String) {
-                val isLocalHtmlDocument = window.localHtmlDisplayName != null && url.startsWith("data:")
-                if (!isLocalHtmlDocument) {
+                // Cefrium first reports about:blank while it replaces the initial page with loadHtml's data: document.
+                // Keep the imported-file marker and display URL through both callbacks.
+                val isLocalHtmlNavigation = window.localHtmlDisplayName != null &&
+                    (url == "about:blank" || url.startsWith("data:"))
+                if (!isLocalHtmlNavigation) {
                     window.localHtmlDisplayName = null
                     window.url = url
                 }
                 if (activeWindowId == windowId) {
-                    lastRequestedUrl = if (isLocalHtmlDocument) window.url else url
+                    lastRequestedUrl = if (isLocalHtmlNavigation) window.url else url
                     runOnUiThread {
                         if (activeWindowId == windowId) {
                             if (!searchField.hasFocus()) {
@@ -435,7 +438,7 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                 }
-                Log.i(TAG, "PAGE_URL_CHANGED window=$windowId incognito=${window.incognito} url=${if (window.incognito) "<private>" else if (isLocalHtmlDocument) "<local-html>" else url}")
+                Log.i(TAG, "PAGE_URL_CHANGED window=$windowId incognito=${window.incognito} url=${if (window.incognito) "<private>" else if (isLocalHtmlNavigation) "<local-html>" else url}")
             }
 
             override fun onLoadingStateChanged(
@@ -457,8 +460,10 @@ class MainActivity : AppCompatActivity() {
                     }
                     Log.i(TAG, "AD_BLOCK_PAGE_STATS window=$windowId enabled=$adBlockingEnabled blockedRequests=${instance.getBlockedCount()}")
                     val pageUrl = instance.getUrl().orEmpty().ifBlank { window.url }
+                    val isLocalHtmlNavigation = window.localHtmlDisplayName != null &&
+                        (pageUrl == "about:blank" || pageUrl.startsWith("data:"))
                     val isLocalHtmlDocument = window.localHtmlDisplayName != null && pageUrl.startsWith("data:")
-                    if (!isLocalHtmlDocument) window.url = pageUrl
+                    if (!isLocalHtmlNavigation) window.url = pageUrl
                     if (pageUrl.startsWith("https://") || pageUrl.startsWith("http://")) {
                         if (!window.incognito && isActiveWindow) {
                             lastSuccessfulUrl = pageUrl
