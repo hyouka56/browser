@@ -302,6 +302,21 @@ if "Windows NT" in ua or "Android" not in ua or data.get("mobile") is not True o
     raise SystemExit(f"Android mobile user-agent and metadata were not restored after disabling PC mode: {data}")
 print("PASS: Android mobile user-agent, Android navigator.platform, and mobile UA metadata restored after disabling PC mode")
 PY
+
+# Verify the restored mobile identity against a real Google search page, then retain its screenshot.
+GOOGLE_SEARCH_URL="https://www.google.com/search?q=hi"
+tap_accessibility_node_with_system_recovery text "https://example.com/"
+adb shell input text "$GOOGLE_SEARCH_URL"
+adb shell input keyevent KEYCODE_ENTER
+wait_for_log "PAGE_LOAD_STATE loading=false" 4 120
+wait_for_log "MOBILE_USER_AGENT_DIAGNOSTICS window=1" 2 45
+sleep 3
+adb exec-out screencap -p > "$ARTIFACTS/google-mobile-search.png"
+if [[ ! -s "$ARTIFACTS/google-mobile-search.png" ]]; then
+  echo "Google mobile search screenshot was not captured." >&2
+  exit 1
+fi
+printf 'PASS: Google search page loaded after returning from PC mode; mobile screenshot captured.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
 printf 'PASS: PC control switched desktop mode on and back to mobile mode.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
 
 # A normal launch must open Android's default-browser chooser without a toolbar button.
@@ -807,7 +822,12 @@ report = {
         "page_load_completed": "PAGE_LOAD_STATE loading=false" in log,
         "desktop_page_content_rendered_without_horizontal_overflow": "PASS: desktop page content rendered at" in desktop_site_results and "with no horizontal overflow after native zoom was applied" in desktop_site_results,
         "mobile_css_viewport_restored_after_disabling_desktop_mode": "PASS: mobile CSS viewport restored to" in desktop_site_results,
-        "mobile_user_agent_restored_after_disabling_desktop_mode": "PASS: Android mobile user-agent, navigator.platform, and mobile UA metadata restored after disabling PC mode" in desktop_site_results,
+        "mobile_user_agent_restored_after_disabling_desktop_mode": "PASS: Android mobile user-agent, Android navigator.platform, and mobile UA metadata restored after disabling PC mode" in desktop_site_results,
+        "google_mobile_search_page_rendered_after_desktop_restore": (
+            "PASS: Google search page loaded after returning from PC mode; mobile screenshot captured." in desktop_site_results and
+            (folder / "google-mobile-search.png").is_file() and
+            (folder / "google-mobile-search.png").stat().st_size > 10000
+        ),
         "desktop_site_toggle_returns_to_mobile_mode": "PASS: PC control switched desktop mode on and back to mobile mode." in desktop_site_results,
         "android_open_with_lists_browser_for_html_and_xhtml": (
             (folder / "open-with-results.txt").is_file() and
