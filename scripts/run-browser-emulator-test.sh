@@ -232,6 +232,7 @@ adb shell am start -W -n "$ACTIVITY" \
 wait_for_log "PAGE_TITLE window=1 title=Example Domain" 1 120
 wait_for_log "PAGE_LOAD_STATE loading=false" 1 120
 wait_for_log "DESKTOP_SITE_INITIAL_STATE window=1 enabled=false" 1 30
+wait_for_log "MOBILE_USER_AGENT_BASELINE_CAPTURED window=1" 1 30
 tap_accessibility_node_with_system_recovery desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 1 30
 wait_for_log "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" 1 30
@@ -275,6 +276,7 @@ adb exec-out screencap -p > "$ARTIFACTS/desktop-site-scaled.png"
 tap_accessibility_node_with_system_recovery desc "Desktop site enabled."
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=false" 1 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 3 120
+wait_for_log "MOBILE_USER_AGENT_OVERRIDE_RESTORED window=1" 1 30
 wait_for_log "MOBILE_VIEWPORT_ZOOM_RESET window=1" 1 30
 wait_for_log "MOBILE_VIEWPORT_DIAGNOSTICS window=1 innerWidth=" 2 30
 MOBILE_DOM_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "MOBILE_VIEWPORT_DIAGNOSTICS window=1" | tail -n1 || true)"
@@ -296,9 +298,9 @@ data = json.loads(match.group(1))
 if isinstance(data, str):
     data = json.loads(data)
 ua = data.get("userAgent", "")
-if "Windows NT" in ua or "Android" not in ua or data.get("mobile") is not True or data.get("platform") == "Win32":
+if "Windows NT" in ua or "Android" not in ua or data.get("mobile") is not True or data.get("platform") != "Android":
     raise SystemExit(f"Android mobile user-agent and metadata were not restored after disabling PC mode: {data}")
-print("PASS: Android mobile user-agent, navigator.platform, and mobile UA metadata restored after disabling PC mode")
+print("PASS: Android mobile user-agent, Android navigator.platform, and mobile UA metadata restored after disabling PC mode")
 PY
 printf 'PASS: PC control switched desktop mode on and back to mobile mode.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
 

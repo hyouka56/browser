@@ -77,7 +77,8 @@ class MainActivity : AppCompatActivity() {
         var url: String,
         val incognito: Boolean,
         var desktopMode: Boolean = false,
-        var localHtmlDisplayName: String? = null
+        var localHtmlDisplayName: String? = null,
+        var mobileUserAgent: String? = null
     )
 
     private lateinit var browser: CefriumBrowser
@@ -459,6 +460,17 @@ class MainActivity : AppCompatActivity() {
                     }
                     Log.i(TAG, "AD_BLOCK_PAGE_STATS window=$windowId enabled=$adBlockingEnabled blockedRequests=${instance.getBlockedCount()}")
                     val pageUrl = instance.getUrl().orEmpty().ifBlank { window.url }
+                    if (!window.desktopMode && window.mobileUserAgent.isNullOrBlank() && isSupportedWebUrl(pageUrl)) {
+                        instance.evaluateJavaScript("navigator.userAgent") { result ->
+                            val mobileUserAgent = result.orEmpty().trim().trim('"')
+                            if (mobileUserAgent.contains("Android") && !mobileUserAgent.contains("Windows NT")) {
+                                window.mobileUserAgent = mobileUserAgent
+                                Log.i(TAG, "MOBILE_USER_AGENT_BASELINE_CAPTURED window=$windowId")
+                            } else {
+                                Log.w(TAG, "MOBILE_USER_AGENT_BASELINE_INVALID window=$windowId")
+                            }
+                        }
+                    }
                     if (isActiveWindow && window.desktopMode && isSupportedWebUrl(pageUrl)) {
                         applyDesktopPageZoom(instance)
                     }
@@ -1254,17 +1266,54 @@ class MainActivity : AppCompatActivity() {
         } else {
             // Restore Chromium's default mobile scale and user agent before reloading.
             target.setUserAgentOverride(null)
-            // Cefrium's native override and Chromium's DevTools Emulation override are
-            // independent. Clearing only the native value leaves Windows UA metadata
-            // active, so Google can continue rendering its desktop search UI.
-            target.executeDevToolsMethod(
-                "Emulation.setUserAgentOverride",
-                JSONObject().put("userAgent", "").toString(),
-                null
-            )
-            target.setZoomLevel(0.0)
             val activeWindow = browserWindows.firstOrNull { it.browser === target }
-            Log.i(TAG, "MOBILE_USER_AGENT_OVERRIDE_CLEARED window=${activeWindow?.id ?: -1}")
+            val mobileUserAgent = activeWindow?.mobileUserAgent
+            if (mobileUserAgent.isNullOrBlank()) {
+                // Do not silently preserve a desktop override if the per-tab Android
+                // baseline was not captured. The emulator test asserts this path is not used.
+                target.executeDevToolsMethod(
+                    "Emulation.setUserAgentOverride",
+                    JSONObject().put("userAgent", "").toString(),
+                    null
+                )
+                Log.e(TAG, "MOBILE_USER_AGENT_BASELINE_MISSING window=${activeWindow?.id ?: -1}")
+            } else {
+                val versionParts = Build.VERSION.RELEASE.orEmpty().split(".")
+                val platformVersion = when (versionParts.size) {
+                    0 -> "0.0.0"
+                    1 -> "${versionParts[0]}.0.0"
+                    2 -> "${versionParts[0]}.${versionParts[1]}.0"
+                    else -> versionParts.take(3).joinToString(".")
+                }
+                val primaryAbi = Build.SUPPORTED_ABIS.firstOrNull().orEmpty()
+                val architecture = when {
+                    primaryAbi.contains("x86", ignoreCase = true) -> "x86"
+                    else -> "arm"
+                }
+                val bitness = if (primaryAbi.contains("64")) "64" else "32"
+                val mobileMetadata = JSONObject()
+                    .put("platform", "Android")
+                    .put("platformVersion", platformVersion)
+                    .put("architecture", architecture)
+                    .put("model", Build.MODEL.orEmpty())
+                    .put("mobile", true)
+                    .put("bitness", bitness)
+                    .put("wow64", false)
+                val mobileParams = JSONObject()
+                    .put("userAgent", mobileUserAgent)
+                    .put("platform", "Android")
+                    .put("userAgentMetadata", mobileMetadata)
+                target.executeDevToolsMethod(
+                    "Emulation.setUserAgentOverride",
+                    mobileParams.toString(),
+                    null
+                )
+                Log.i(
+                    TAG,
+                    "MOBILE_USER_AGENT_OVERRIDE_RESTORED window=${activeWindow.id} platform=Android platformVersion=$platformVersion architecture=$architecture bitness=$bitness mobile=true"
+                )
+            }
+            target.setZoomLevel(0.0)
             Log.i(TAG, "MOBILE_VIEWPORT_ZOOM_RESET window=${activeWindow?.id ?: -1}")
         }
     }
