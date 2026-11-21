@@ -400,6 +400,22 @@ fi
 printf 'PASS: Google search was tested in mobile and PC modes; desktop and restored-mobile screenshots captured.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
 printf 'PASS: PC control switched desktop mode on and back to mobile mode on Google.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
 
+# Focus the restored Google search field and capture the exact state in which its keyboard controls should be visible.
+tap_accessibility_node_with_system_recovery text "hi"
+sleep 2
+adb exec-out screencap -p > "$ARTIFACTS/google-mobile-search-focused.png"
+adb shell uiautomator dump /sdcard/google-mobile-search-focused.xml >/dev/null 2>&1
+adb exec-out cat /sdcard/google-mobile-search-focused.xml > "$ARTIFACTS/google-mobile-search-focused-ui.xml"
+python3 - "$ARTIFACTS/google-mobile-search-focused-ui.xml" <<'PY' | tee -a "$ARTIFACTS/desktop-site-results.txt"
+import sys
+import xml.etree.ElementTree as ET
+root = ET.parse(sys.argv[1]).getroot()
+focused = any(node.attrib.get('class') == 'android.widget.EditText' and node.attrib.get('text') == 'hi' and node.attrib.get('focused') == 'true' for node in root.iter('node'))
+if not focused:
+    raise SystemExit('Google restored mobile search input did not receive focus')
+print('PASS: Google mobile search field focused after PC mode restore; keyboard-control screenshot captured')
+PY
+
 # A normal launch must open Android's default-browser chooser without a toolbar button.
 adb logcat -c
 adb shell am force-stop "$PACKAGE"
@@ -914,6 +930,12 @@ report = {
             "PASS: Google mobile user-agent, viewport and mobile metadata restored after PC mode." in desktop_site_results and
             (folder / "google-mobile-search-restored.png").is_file() and
             (folder / "google-mobile-search-restored.png").stat().st_size > 10000
+        ),
+        "google_mobile_search_field_focused_after_pc_restore": (
+            "PASS: Google mobile search field focused after PC mode restore; keyboard-control screenshot captured" in desktop_site_results and
+            (folder / "google-mobile-search-focused.png").is_file() and
+            (folder / "google-mobile-search-focused-ui.xml").is_file() and
+            (folder / "google-mobile-search-focused.png").stat().st_size > 10000
         ),
         "desktop_site_toggle_returns_to_mobile_mode": "PASS: PC control switched desktop mode on and back to mobile mode on Google." in desktop_site_results,
         "android_open_with_lists_browser_for_html_and_xhtml": (
