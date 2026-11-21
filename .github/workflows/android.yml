@@ -140,6 +140,7 @@ jobs:
       matrix:
         include:
           - api-level: 30
+          - api-level: 31
           - api-level: 35
           - api-level: 36
     steps:
