@@ -283,7 +283,15 @@ wait_for_log "PAGE_TITLE window=1 title=Example Domain" 1 120
 wait_for_log "PAGE_LOAD_STATE loading=false" 1 120
 tap_accessibility_node desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 1 30
+wait_for_log "DESKTOP_PAGE_SCALE_APPLIED window=1" 1 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 2 120
+DESKTOP_SCALE_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_PAGE_SCALE_APPLIED window=1" | tail -n1 || true)"
+if [[ ! "$DESKTOP_SCALE_LOG" =~ pageScaleFactor=0\.[0-9]+ ]]; then
+  echo "Expected desktop mode to scale the 1280px viewport to the phone surface; got: $DESKTOP_SCALE_LOG" >&2
+  adb logcat -d -s Browser:V >&2 || true
+  exit 1
+fi
+adb exec-out screencap -p > "$ARTIFACTS/desktop-site-scaled.png"
 tap_accessibility_node desc "Desktop site enabled."
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=false" 1 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 3 120

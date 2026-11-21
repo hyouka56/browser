@@ -444,6 +444,7 @@ class MainActivity : AppCompatActivity() {
                 if (!isLoading) {
                     val isActiveWindow = activeWindowId == windowId
                     if (isActiveWindow) {
+                        if (window.desktopMode) applyDesktopPageScale(instance)
                         updateShieldButton()
                         updateDesktopSiteButton()
                     }
@@ -895,7 +896,17 @@ class MainActivity : AppCompatActivity() {
         ))
 
         // Let Cefrium own browser gestures. Its native refresh only fires at the web-page top.
-        browserSlot = FrameLayout(this).apply { setBackgroundColor(Color.WHITE) }
+        browserSlot = FrameLayout(this).apply {
+            setBackgroundColor(Color.WHITE)
+            addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
+                val newWidth = right - left
+                val oldWidth = oldRight - oldLeft
+                if (newWidth > 0 && newWidth != oldWidth) {
+                    browserWindows.firstOrNull { it.id == activeWindowId && it.desktopMode }
+                        ?.let { applyDesktopPageScale(it.browser) }
+                }
+            }
+        }
         content.addView(browserSlot, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT
@@ -1171,13 +1182,48 @@ class MainActivity : AppCompatActivity() {
                 metrics.toString(),
                 null
             )
+            applyDesktopPageScale(target)
         } else {
             target.setUserAgentOverride(null)
+            target.executeDevToolsMethod(
+                "Emulation.resetPageScaleFactor",
+                "{}",
+                null
+            )
             target.executeDevToolsMethod(
                 "Emulation.clearDeviceMetricsOverride",
                 "{}",
                 null
             )
+        }
+    }
+
+    private fun applyDesktopPageScale(target: CefriumBrowser) {
+        browserSlot.post {
+            val activeWindow = browserWindows.firstOrNull {
+                it.id == activeWindowId && it.browser === target && it.desktopMode
+            } ?: return@post
+            val viewportWidthPx = browserSlot.width
+            if (viewportWidthPx <= 0) {
+                Log.w(TAG, "DESKTOP_PAGE_SCALE_SKIPPED window=${activeWindow.id} widthPx=$viewportWidthPx")
+                return@post
+            }
+
+            // The desktop viewport is expressed in CSS pixels with deviceScaleFactor=1.
+            // Scale it to the actual surface width so the full desktop layout is visible on phones.
+            val pageScaleFactor = (viewportWidthPx.toDouble() / DESKTOP_VIEWPORT_WIDTH.toDouble())
+                .coerceIn(0.1, 1.0)
+            val params = JSONObject().put("pageScaleFactor", pageScaleFactor).toString()
+            target.executeDevToolsMethod("Emulation.setPageScaleFactor", params) { success, resultJson ->
+                if (success) {
+                    Log.i(
+                        TAG,
+                        "DESKTOP_PAGE_SCALE_APPLIED window=${activeWindow.id} widthPx=$viewportWidthPx pageScaleFactor=$pageScaleFactor"
+                    )
+                } else {
+                    Log.w(TAG, "DESKTOP_PAGE_SCALE_FAILED window=${activeWindow.id} result=$resultJson")
+                }
+            }
         }
     }
 
@@ -1362,6 +1408,7 @@ class MainActivity : AppCompatActivity() {
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT
         ))
+        if (target.desktopMode) applyDesktopPageScale(target.browser)
         rendererErrorPanel.visibility = View.GONE
         lastRequestedUrl = target.url
         if (!target.incognito && target.url.startsWith("http")) lastSuccessfulUrl = target.url
