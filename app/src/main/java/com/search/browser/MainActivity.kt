@@ -268,6 +268,7 @@ class MainActivity : AppCompatActivity() {
         instance.setBackgroundColor(Color.WHITE)
         instance.setDarkMode(false)
         applyDesktopSiteSettings(instance, window.desktopMode)
+        Log.i(TAG, "DESKTOP_SITE_INITIAL_STATE window=$windowId enabled=${window.desktopMode}")
         Log.i(TAG, "DARK_APP_CHROME_ENABLED websiteColorsUntouched=true")
         instance.setPageVisible(true)
         instance.setFocus(true)
