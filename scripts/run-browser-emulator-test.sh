@@ -26,6 +26,10 @@ collect_evidence() {
 trap collect_evidence EXIT
 
 adb wait-for-device
+# Match OPPO A73 (CPH2095) screen geometry for this Android 12 reproduction.
+# 408 dpi is a logical-density approximation, not a ColorOS firmware clone.
+adb shell wm size 1080x2400
+adb shell wm density 408
 ACTUAL_API="$(adb shell getprop ro.build.version.sdk | tr -d '\r')"
 if [[ "$ACTUAL_API" != "$EXPECTED_API" ]]; then
   echo "Expected Android API $EXPECTED_API but emulator reports $ACTUAL_API" >&2
@@ -37,6 +41,8 @@ fi
   echo "Actual API: $ACTUAL_API"
   echo "ABI list: $(adb shell getprop ro.product.cpu.abilist | tr -d '\r')"
   echo "Device: $(adb shell getprop ro.product.model | tr -d '\r')"
+  echo "Screen size override: $(adb shell wm size | tr -d '\r' | tr '\n' ';')"
+  echo "Screen density override: $(adb shell wm density | tr -d '\r' | tr '\n' ';')"
 } | tee "$ARTIFACTS/device.txt"
 
 adb logcat -c
@@ -431,6 +437,78 @@ if not focused:
     raise SystemExit('Google restored mobile search input did not receive focus')
 print('PASS: Google mobile search field focused after PC mode restore; keyboard-control screenshot captured')
 PY
+
+# Reproduce the original wide-site failure on GitHub while the same tab is in desktop mode.
+# The user's screenshots show GitHub Dashboard and a dictionary page cropped horizontally;
+# Google alone is not a sufficient desktop-layout test.
+adb shell input keyevent KEYCODE_BACK
+GITHUB_DESKTOP_URL="https://github.com/hyouka56/browser"
+adb shell am start --activity-single-top -W -n "$ACTIVITY" -a android.intent.action.VIEW -d "$GITHUB_DESKTOP_URL" 2>&1 | tee "$ARTIFACTS/github-mobile-repository-launch.txt"
+wait_for_log "PAGE_LOAD_STATE loading=false" 7 120
+sleep 3
+if ! dismiss_external_anr_dialog_if_present; then
+  echo "Could not safely dismiss an external system ANR before GitHub mobile screenshot capture." >&2
+  exit 1
+fi
+adb exec-out screencap -p > "$ARTIFACTS/github-mobile-repository.png"
+tap_accessibility_node_with_system_recovery desc "Show desktop site"
+wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 3 30
+wait_for_log "PAGE_LOAD_STATE loading=false" 8 120
+wait_for_log "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" 3 45
+wait_for_log "DESKTOP_DOM_DIAGNOSTICS window=1" 3 45
+sleep 4
+if ! dismiss_external_anr_dialog_if_present; then
+  echo "Could not safely dismiss an external system ANR before GitHub PC screenshot capture." >&2
+  exit 1
+fi
+adb exec-out screencap -p > "$ARTIFACTS/github-desktop-repository.png"
+adb shell uiautomator dump /sdcard/github-desktop-repository.xml >/dev/null 2>&1
+adb exec-out cat /sdcard/github-desktop-repository.xml > "$ARTIFACTS/github-desktop-repository-ui.xml"
+GITHUB_DESKTOP_DOM_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_DOM_DIAGNOSTICS window=1" | tail -n1 || true)"
+python3 - "$GITHUB_DESKTOP_DOM_LOG" <<'PY' | tee -a "$ARTIFACTS/desktop-site-results.txt"
+import json, re, sys
+match = re.search(r"result=(.*)$", sys.argv[1])
+if not match:
+    raise SystemExit(f"GitHub PC-mode DOM diagnostics missing: {sys.argv[1]}")
+data = json.loads(match.group(1))
+if isinstance(data, str):
+    data = json.loads(data)
+title = data.get("title", "")
+body = data.get("bodyText", "")
+inner = int(data.get("innerWidth", 0))
+client = int(data.get("clientWidth", 0))
+doc_scroll = int(data.get("scrollWidth", 0))
+body_client = int(data.get("bodyClientWidth", 0))
+body_scroll = int(data.get("bodyScrollWidth", 0))
+body_rect = int(data.get("bodyRectWidth", 0))
+doc_rect = int(data.get("documentRectWidth", 0))
+if not title.strip() or not body.strip() or "github" not in title.lower() and "browser" not in title.lower():
+    print(f"FAIL: GitHub repository page did not render in PC mode: {data}")
+else:
+    print(f"PASS: GitHub repository page loaded in PC mode; title={title!r}, innerWidth={inner}px, client={client}px, documentScroll={doc_scroll}px, bodyScroll={body_scroll}px, bodyRect={body_rect}px, documentRect={doc_rect}px, visualScale={data.get('visualViewportScale')}")
+overflow = max(doc_scroll, body_scroll, body_rect, doc_rect) > max(client, body_client, inner) + 8
+if overflow:
+    print(f"FAIL: GitHub desktop layout extends beyond its viewport: inner={inner}, client={client}, docScroll={doc_scroll}, bodyClient={body_client}, bodyScroll={body_scroll}, bodyRect={body_rect}, documentRect={doc_rect}")
+else:
+    print("PASS: GitHub desktop repository page has no horizontal document/body overflow.")
+PY
+if [[ ! -s "$ARTIFACTS/github-desktop-repository.png" ]] || [[ "$(wc -c < "$ARTIFACTS/github-desktop-repository.png")" -le 10000 ]]; then
+  echo "GitHub PC-mode screenshot was not captured correctly." >&2
+  exit 1
+fi
+# Restore mobile mode on the GitHub tab as well, and keep the corresponding screenshot.
+tap_accessibility_node_with_system_recovery desc "Desktop site enabled. Tap to use mobile site"
+wait_for_log "DESKTOP_SITE_MODE window=1 enabled=false" 3 30
+wait_for_log "PAGE_LOAD_STATE loading=false" 9 120
+wait_for_log "MOBILE_USER_AGENT_OVERRIDE_RESTORED window=1" 3 45
+wait_for_log "MOBILE_VIEWPORT_ZOOM_RESET window=1" 3 30
+sleep 3
+if ! dismiss_external_anr_dialog_if_present; then
+  echo "Could not safely dismiss an external system ANR before GitHub mobile restore screenshot." >&2
+  exit 1
+fi
+adb exec-out screencap -p > "$ARTIFACTS/github-mobile-restored.png"
+printf 'PASS: GitHub repository page was tested with PC enabled and then returned to mobile mode.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
 
 # A normal launch must open Android's default-browser chooser without a toolbar button.
 adb logcat -c
@@ -952,6 +1030,20 @@ report = {
             (folder / "google-mobile-search-focused.png").is_file() and
             (folder / "google-mobile-search-focused-ui.xml").is_file() and
             (folder / "google-mobile-search-focused.png").stat().st_size > 10000
+        ),
+        "github_desktop_repository_rendered_in_pc_mode": (
+            "PASS: GitHub repository page loaded in PC mode" in desktop_site_results and
+            (folder / "github-desktop-repository.png").is_file() and
+            (folder / "github-desktop-repository-ui.xml").is_file() and
+            (folder / "github-desktop-repository.png").stat().st_size > 10000
+        ),
+        "github_desktop_repository_has_no_horizontal_overflow": (
+            "PASS: GitHub desktop repository page has no horizontal document/body overflow." in desktop_site_results
+        ),
+        "github_pc_mode_returns_to_mobile": (
+            "PASS: GitHub repository page was tested with PC enabled and then returned to mobile mode." in desktop_site_results and
+            (folder / "github-mobile-restored.png").is_file() and
+            (folder / "github-mobile-restored.png").stat().st_size > 10000
         ),
         "desktop_site_toggle_returns_to_mobile_mode": "PASS: PC control switched desktop mode on and back to mobile mode on Google." in desktop_site_results,
         "android_open_with_lists_browser_for_html_and_xhtml": (

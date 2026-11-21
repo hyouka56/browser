@@ -507,7 +507,12 @@ class MainActivity : AppCompatActivity() {
                                                 devicePixelRatio: window.devicePixelRatio,
                                                 clientWidth: document.documentElement?.clientWidth || 0,
                                                 scrollWidth: document.documentElement?.scrollWidth || 0,
+                                                bodyClientWidth: document.body?.clientWidth || 0,
+                                                bodyScrollWidth: document.body?.scrollWidth || 0,
+                                                bodyRectWidth: Math.round(document.body?.getBoundingClientRect().width || 0),
+                                                documentRectWidth: Math.round(document.documentElement?.getBoundingClientRect().width || 0),
                                                 visualViewportWidth: Math.round(window.visualViewport?.width || 0),
+                                                visualViewportScale: Number(window.visualViewport?.scale || 1),
                                                 screenHeight: screen.height
                                             })"""
                                         ) { result ->
