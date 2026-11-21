@@ -507,12 +507,7 @@ class MainActivity : AppCompatActivity() {
                                                 devicePixelRatio: window.devicePixelRatio,
                                                 clientWidth: document.documentElement?.clientWidth || 0,
                                                 scrollWidth: document.documentElement?.scrollWidth || 0,
-                                                bodyClientWidth: document.body?.clientWidth || 0,
-                                                bodyScrollWidth: document.body?.scrollWidth || 0,
-                                                bodyRectWidth: Math.round(document.body?.getBoundingClientRect().width || 0),
-                                                documentRectWidth: Math.round(document.documentElement?.getBoundingClientRect().width || 0),
                                                 visualViewportWidth: Math.round(window.visualViewport?.width || 0),
-                                                visualViewportScale: Number(window.visualViewport?.scale || 1),
                                                 screenHeight: screen.height
                                             })"""
                                         ) { result ->
@@ -1269,6 +1264,18 @@ class MainActivity : AppCompatActivity() {
                 null
             )
         } else {
+            // Restore the physical Android viewport and device scale before reloading.
+            target.executeDevToolsMethod(
+                "Emulation.clearDeviceMetricsOverride",
+                "{}"
+            ) { success, resultJson ->
+                val activeWindow = browserWindows.firstOrNull { it.browser === target }
+                if (success) {
+                    Log.i(TAG, "MOBILE_DEVICE_METRICS_RESTORED window=${activeWindow?.id ?: -1}")
+                } else {
+                    Log.e(TAG, "MOBILE_DEVICE_METRICS_RESTORE_FAILED window=${activeWindow?.id ?: -1} result=$resultJson")
+                }
+            }
             // Restore Chromium's default mobile scale and user agent before reloading.
             target.setUserAgentOverride(null)
             val activeWindow = browserWindows.firstOrNull { it.browser === target }
@@ -1342,22 +1349,63 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
-            // Fit a 1280 CSS-pixel desktop page into the measured browser surface.
-            // Apply this after navigation completes: loadUrl can reset browser zoom.
-            // Do not calibrate using window.innerWidth; Chromium's page zoom changes
-            // visual scale, not the CSS layout viewport reported by that property.
-            val targetCssWidth = DESKTOP_VIEWPORT_WIDTH.toDouble()
-            val density = resources.displayMetrics.density.toDouble().coerceAtLeast(0.1)
-            val viewportWidthDp = surfaceWidthPx.toDouble() / density
-            val zoomFactor = (viewportWidthDp / targetCssWidth).coerceIn(0.1, 1.0)
-            val zoomLevel = (kotlin.math.ln(zoomFactor) / kotlin.math.ln(1.2)).coerceIn(-10.0, 0.0)
-            target.setZoomLevel(zoomLevel)
-            val factorText = String.format(Locale.ROOT, "%.4f", zoomFactor)
-            val levelText = String.format(Locale.ROOT, "%.4f", zoomLevel)
-            Log.i(
-                TAG,
-                "DESKTOP_VIEWPORT_ZOOM_APPLIED window=${activeWindow.id} surfaceWidthPx=$surfaceWidthPx surfaceHeightPx=$surfaceHeightPx density=$density viewportWidthDp=$viewportWidthDp zoomFactor=$factorText zoomLevel=$levelText targetCssWidth=$targetCssWidth appliedAfterLoad=true"
-            )
+            // A page zoom cannot select the page's CSS layout width. Ask Chromium
+            // for a real desktop viewport, then scale that desktop canvas into the
+            // measured Android surface. The DPR is 1 to emulate an ordinary desktop.
+            val targetCssWidth = DESKTOP_VIEWPORT_WIDTH
+            val targetCssHeight = Math.round(
+                targetCssWidth.toDouble() * surfaceHeightPx.toDouble() / surfaceWidthPx.toDouble()
+            ).toInt().coerceAtLeast(1)
+            val deviceMetrics = JSONObject()
+                .put("width", targetCssWidth)
+                .put("height", targetCssHeight)
+                .put("screenWidth", targetCssWidth)
+                .put("screenHeight", targetCssHeight)
+                .put("deviceScaleFactor", 1.0)
+                .put("mobile", false)
+
+            target.executeDevToolsMethod(
+                "Emulation.setDeviceMetricsOverride",
+                deviceMetrics.toString()
+            ) { success, resultJson ->
+                val currentWindow = browserWindows.firstOrNull {
+                    it.id == activeWindowId && it.browser === target && it.desktopMode
+                } ?: return@executeDevToolsMethod
+                if (success) {
+                    val zoomFactor = (surfaceWidthPx.toDouble() / targetCssWidth.toDouble())
+                        .coerceIn(0.1, 1.0)
+                    val zoomLevel = (kotlin.math.ln(zoomFactor) / kotlin.math.ln(1.2))
+                        .coerceIn(-10.0, 0.0)
+                    target.setZoomLevel(zoomLevel)
+                    val factorText = String.format(Locale.ROOT, "%.4f", zoomFactor)
+                    val levelText = String.format(Locale.ROOT, "%.4f", zoomLevel)
+                    Log.i(
+                        TAG,
+                        "DESKTOP_DEVICE_METRICS_APPLIED window=${currentWindow.id} cssWidth=$targetCssWidth cssHeight=$targetCssHeight deviceScaleFactor=1.0 mobile=false"
+                    )
+                    Log.i(
+                        TAG,
+                        "DESKTOP_VIEWPORT_ZOOM_APPLIED window=${currentWindow.id} surfaceWidthPx=$surfaceWidthPx surfaceHeightPx=$surfaceHeightPx cssViewportWidth=$targetCssWidth cssViewportHeight=$targetCssHeight deviceScaleFactor=1.0 zoomFactor=$factorText zoomLevel=$levelText targetCssWidth=$targetCssWidth appliedAfterLoad=true"
+                    )
+                } else {
+                    // Keep the existing zoom behavior as a safe fallback if this
+                    // Chromium build refuses the device-metrics command.
+                    val density = resources.displayMetrics.density.toDouble().coerceAtLeast(0.1)
+                    val viewportWidthDp = surfaceWidthPx.toDouble() / density
+                    val fallbackFactor = (viewportWidthDp / targetCssWidth.toDouble()).coerceIn(0.1, 1.0)
+                    val fallbackLevel = (kotlin.math.ln(fallbackFactor) / kotlin.math.ln(1.2))
+                        .coerceIn(-10.0, 0.0)
+                    target.setZoomLevel(fallbackLevel)
+                    Log.e(
+                        TAG,
+                        "DESKTOP_DEVICE_METRICS_FAILED window=${currentWindow.id} result=$resultJson; using legacy page zoom"
+                    )
+                    Log.i(
+                        TAG,
+                        "DESKTOP_VIEWPORT_ZOOM_APPLIED window=${currentWindow.id} surfaceWidthPx=$surfaceWidthPx surfaceHeightPx=$surfaceHeightPx density=$density viewportWidthDp=$viewportWidthDp zoomFactor=$fallbackFactor zoomLevel=$fallbackLevel targetCssWidth=$targetCssWidth appliedAfterLoad=true fallback=true"
+                    )
+                }
+            }
         }
 
         // The navigation callback normally runs after layout. Keep bounded retries for

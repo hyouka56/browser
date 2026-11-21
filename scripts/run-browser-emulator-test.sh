@@ -454,6 +454,7 @@ adb exec-out screencap -p > "$ARTIFACTS/github-mobile-repository.png"
 tap_accessibility_node_with_system_recovery desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 3 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 8 120
+wait_for_log "DESKTOP_DEVICE_METRICS_APPLIED window=1" 3 45
 wait_for_log "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" 3 45
 wait_for_log "DESKTOP_DOM_DIAGNOSTICS window=1" 3 45
 sleep 4
@@ -486,6 +487,10 @@ if not title.strip() or not body.strip() or "github" not in title.lower() and "b
     print(f"FAIL: GitHub repository page did not render in PC mode: {data}")
 else:
     print(f"PASS: GitHub repository page loaded in PC mode; title={title!r}, innerWidth={inner}px, client={client}px, documentScroll={doc_scroll}px, bodyScroll={body_scroll}px, bodyRect={body_rect}px, documentRect={doc_rect}px, visualScale={data.get('visualViewportScale')}")
+if inner < 1200 or client < 1200:
+    print(f"FAIL: GitHub did not receive a full desktop CSS viewport: innerWidth={inner}, clientWidth={client}")
+else:
+    print(f"PASS: GitHub received a desktop CSS viewport of {inner}px.")
 overflow = max(doc_scroll, body_scroll, body_rect, doc_rect) > max(client, body_client, inner) + 8
 if overflow:
     print(f"FAIL: GitHub desktop layout extends beyond its viewport: inner={inner}, client={client}, docScroll={doc_scroll}, bodyClient={body_client}, bodyScroll={body_scroll}, bodyRect={body_rect}, documentRect={doc_rect}")
@@ -502,6 +507,7 @@ wait_for_log "DESKTOP_SITE_MODE window=1 enabled=false" 3 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 9 120
 wait_for_log "MOBILE_USER_AGENT_OVERRIDE_RESTORED window=1" 3 45
 wait_for_log "MOBILE_VIEWPORT_ZOOM_RESET window=1" 3 30
+wait_for_log "MOBILE_DEVICE_METRICS_RESTORED window=1" 1 30
 sleep 3
 if ! dismiss_external_anr_dialog_if_present; then
   echo "Could not safely dismiss an external system ANR before GitHub mobile restore screenshot." >&2
@@ -1039,6 +1045,9 @@ report = {
         ),
         "github_desktop_repository_has_no_horizontal_overflow": (
             "PASS: GitHub desktop repository page has no horizontal document/body overflow." in desktop_site_results
+        ),
+        "github_desktop_css_viewport_is_at_least_1200px": (
+            "PASS: GitHub received a desktop CSS viewport of" in desktop_site_results
         ),
         "github_pc_mode_returns_to_mobile": (
             "PASS: GitHub repository page was tested with PC enabled and then returned to mobile mode." in desktop_site_results and
