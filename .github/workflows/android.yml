@@ -93,30 +93,30 @@ jobs:
           "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --verbose "$PHONE_DEBUG"
           "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --verbose "$ARM64_DEBUG"
           unset JDK_JAVA_OPTIONS
-          "$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$PHONE_DEBUG" | grep -F "package: name='com.search.browser' versionCode='22' versionName='1.0.21'"
-          cp "$PHONE_DEBUG" Browser-1.0.21-ARM32-TV-Lite-Debug-Signed.apk
-          cp "$ARM64_DEBUG" Browser-1.0.21-ARM64-Debug-Signed.apk
+          "$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$PHONE_DEBUG" | grep -F "package: name='com.search.browser' versionCode='23' versionName='1.0.22'"
+          cp "$PHONE_DEBUG" Browser-1.0.22-ARM32-TV-Lite-Debug-Signed.apk
+          cp "$ARM64_DEBUG" Browser-1.0.22-ARM64-Debug-Signed.apk
 
       - name: Upload installable ARM32 APK
         uses: actions/upload-artifact@v7.0.2
         with:
-          name: Browser-1.0.21-ARM32-TV-Lite-Debug-Signed
-          path: Browser-1.0.21-ARM32-TV-Lite-Debug-Signed.apk
+          name: Browser-1.0.22-ARM32-TV-Lite-Debug-Signed
+          path: Browser-1.0.22-ARM32-TV-Lite-Debug-Signed.apk
           if-no-files-found: error
           retention-days: 14
 
       - name: Upload installable ARM64 APK
         uses: actions/upload-artifact@v7.0.2
         with:
-          name: Browser-1.0.21-ARM64-Debug-Signed
-          path: Browser-1.0.21-ARM64-Debug-Signed.apk
+          name: Browser-1.0.22-ARM64-Debug-Signed
+          path: Browser-1.0.22-ARM64-Debug-Signed.apk
           if-no-files-found: error
           retention-days: 14
 
       - name: Upload emulator APK
         uses: actions/upload-artifact@v7.0.2
         with:
-          name: Browser-1.0.21-x86_64-Emulator-Debug
+          name: Browser-1.0.22-x86_64-Emulator-Debug
           path: app/build/outputs/apk/emulator/debug/app-emulator-debug.apk
           if-no-files-found: error
           retention-days: 14
@@ -152,7 +152,7 @@ jobs:
         run: |
           gh run download "$GITHUB_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
-            --name "Browser-1.0.21-x86_64-Emulator-Debug" \
+            --name "Browser-1.0.22-x86_64-Emulator-Debug" \
             --dir "$RUNNER_TEMP/browser-apk"
 
       - name: Enable KVM

@@ -107,6 +107,7 @@ class MainActivity : AppCompatActivity() {
     private var lastSuccessfulUrl = HOME_URL
     private var testCrashRenderer = false
     private var testCrashTriggered = false
+    private var desktopZoomCalibrationGeneration = 0
     private val preferences by lazy { getSharedPreferences(PREFERENCES, MODE_PRIVATE) }
     private val downloadRecords = LinkedHashMap<Int, DownloadRecord>()
     private val activeDownloadItems = LinkedHashMap<Int, CefriumBrowser.DownloadItem>()
@@ -513,6 +514,15 @@ class MainActivity : AppCompatActivity() {
                                                 TAG,
                                                 "MOBILE_VIEWPORT_DIAGNOSTICS window=$windowId innerWidth=${result.orEmpty()}"
                                             )
+                                        }
+                                        instance.evaluateJavaScript(
+                                            """JSON.stringify({
+                                                userAgent: navigator.userAgent || "",
+                                                mobile: navigator.userAgentData ? navigator.userAgentData.mobile : null,
+                                                platform: navigator.platform || ""
+                                            })"""
+                                        ) { result ->
+                                            Log.i(TAG, "MOBILE_USER_AGENT_DIAGNOSTICS window=$windowId result=${result.orEmpty()}")
                                         }
                                     }.onFailure { error ->
                                         Log.w(TAG, "MOBILE_VIEWPORT_DIAGNOSTICS_SKIPPED window=$windowId browser_closed=true", error)
@@ -1239,77 +1249,117 @@ class MainActivity : AppCompatActivity() {
                 userAgentParams.toString(),
                 null
             )
-            applyDesktopViewportMetrics(target)
+            applyDesktopPageZoom(target)
         } else {
+            // Invalidate any delayed desktop calibration before restoring the native
+            // mobile scale and user agent. The following loadUrl then renders mobile UI.
+            desktopZoomCalibrationGeneration++
             target.setUserAgentOverride(null)
-            target.executeDevToolsMethod("Emulation.clearDeviceMetricsOverride", "{}") { success, resultJson ->
-                val activeWindow = browserWindows.firstOrNull { it.browser === target }
-                if (success) {
-                    Log.i(TAG, "MOBILE_VIEWPORT_METRICS_CLEARED window=${activeWindow?.id ?: -1}")
-                } else {
-                    Log.w(TAG, "MOBILE_VIEWPORT_METRICS_CLEAR_FAILED window=${activeWindow?.id ?: -1} result=$resultJson")
-                }
-            }
+            target.setZoomLevel(0.0)
+            val activeWindow = browserWindows.firstOrNull { it.browser === target }
+            Log.i(TAG, "MOBILE_VIEWPORT_ZOOM_RESET window=${activeWindow?.id ?: -1}")
         }
     }
 
-    private fun applyDesktopViewportMetrics(target: CefriumBrowser) {
+    private fun applyDesktopPageZoom(target: CefriumBrowser) {
         fun applyWhenSurfaceIsReady(attempt: Int) {
             val activeWindow = browserWindows.firstOrNull {
                 it.id == activeWindowId && it.browser === target && it.desktopMode
             } ?: return
-            val surfaceWidthPx = browserSlot.width
-            val surfaceHeightPx = browserSlot.height
-            if (surfaceWidthPx <= 0 || surfaceHeightPx <= 0) {
+            val viewportWidthPx = browserSlot.width
+            val density = resources.displayMetrics.density.toDouble().coerceAtLeast(0.1)
+            if (viewportWidthPx <= 0 || browserSlot.height <= 0) {
                 if (attempt < 8) {
                     browserSlot.postDelayed({ applyWhenSurfaceIsReady(attempt + 1) }, 100L)
                 } else {
-                    Log.w(
-                        TAG,
-                        "DESKTOP_VIEWPORT_METRICS_SKIPPED window=${activeWindow.id} surfaceWidthPx=$surfaceWidthPx surfaceHeightPx=$surfaceHeightPx"
-                    )
+                    Log.w(TAG, "DESKTOP_VIEWPORT_ZOOM_SKIPPED window=${activeWindow.id} widthPx=$viewportWidthPx heightPx=${browserSlot.height}")
                 }
                 return
             }
 
-            // Fit a 1280 CSS-pixel desktop layout into the existing Surface. The DPR
-            // maps 1280 CSS pixels to the Surface's physical width. dontSetVisibleSize
-            // deliberately leaves the native Surface bounds untouched (unlike the
-            // earlier full DeviceMetricsOverride which could blank Surface rendering).
-            val desktopCssWidth = maxOf(DESKTOP_VIEWPORT_WIDTH, surfaceWidthPx)
-            val deviceScaleFactor = (surfaceWidthPx.toDouble() / desktopCssWidth.toDouble())
-                .coerceIn(0.1, 1.0)
-            val desktopCssHeight = kotlin.math.ceil(surfaceHeightPx.toDouble() / deviceScaleFactor).toInt()
-            val metrics = JSONObject()
-                .put("width", desktopCssWidth)
-                .put("height", desktopCssHeight)
-                .put("screenWidth", desktopCssWidth)
-                .put("screenHeight", desktopCssHeight)
-                .put("deviceScaleFactor", deviceScaleFactor)
-                .put("mobile", false)
-                .put("dontSetVisibleSize", true)
-            target.executeDevToolsMethod(
-                "Emulation.setDeviceMetricsOverride",
-                metrics.toString()
-            ) { success, resultJson ->
-                val scaleText = String.format(Locale.ROOT, "%.4f", deviceScaleFactor)
-                if (success) {
-                    Log.i(
-                        TAG,
-                        "DESKTOP_VIEWPORT_METRICS_APPLIED window=${activeWindow.id} surfaceWidthPx=$surfaceWidthPx surfaceHeightPx=$surfaceHeightPx cssWidth=$desktopCssWidth cssHeight=$desktopCssHeight deviceScaleFactor=$scaleText dontSetVisibleSize=true"
-                    )
-                } else {
-                    Log.w(
-                        TAG,
-                        "DESKTOP_VIEWPORT_METRICS_FAILED window=${activeWindow.id} surfaceWidthPx=$surfaceWidthPx result=$resultJson"
-                    )
-                }
+            // Use native page zoom rather than overriding the virtual screen size.
+            // DeviceMetricsOverride can report a 1280px DOM viewport while the native
+            // Surface still displays only its leftmost physical slice on mobile devices.
+            val calibrationGeneration = ++desktopZoomCalibrationGeneration
+            val targetCssWidth = DESKTOP_VIEWPORT_WIDTH.toDouble()
+            val viewportWidthDp = viewportWidthPx.toDouble() / density
+            val zoomFactor = (viewportWidthDp / targetCssWidth).coerceIn(0.1, 1.0)
+            val initialZoomLevel = kotlin.math.ln(zoomFactor) / kotlin.math.ln(1.2)
+            target.setZoomLevel(initialZoomLevel)
+            val factorText = String.format(Locale.ROOT, "%.4f", zoomFactor)
+            val levelText = String.format(Locale.ROOT, "%.4f", initialZoomLevel)
+            Log.i(
+                TAG,
+                "DESKTOP_VIEWPORT_ZOOM_APPLIED window=${activeWindow.id} surfaceWidthPx=$viewportWidthPx density=$density viewportWidthDp=$viewportWidthDp zoomFactor=$factorText zoomLevel=$levelText targetCssWidth=$targetCssWidth"
+            )
+
+            fun isCurrentCalibration(): Boolean =
+                calibrationGeneration == desktopZoomCalibrationGeneration &&
+                    activeWindowId == activeWindow.id &&
+                    ::browser.isInitialized && browser === target &&
+                    browserWindows.any { it.id == activeWindow.id && it.browser === target && it.desktopMode }
+
+            fun verifyAndCalibrate(attempt: Int, currentZoomLevel: Double) {
+                browserSlot.postDelayed({
+                    if (isCurrentCalibration()) {
+                        runCatching {
+                            target.evaluateJavaScript("window.innerWidth") { result ->
+                                if (!isCurrentCalibration()) return@evaluateJavaScript
+                                val measuredWidth = result.orEmpty().trim().trim('"').toDoubleOrNull()
+                                if (measuredWidth == null || measuredWidth <= 0.0) {
+                                    Log.w(
+                                        TAG,
+                                        "DESKTOP_VIEWPORT_ZOOM_MEASURE_FAILED window=${activeWindow.id} attempt=$attempt result=${result.orEmpty()}"
+                                    )
+                                } else {
+                                    val errorRatio = measuredWidth / targetCssWidth
+                                    if (kotlin.math.abs(errorRatio - 1.0) <= 0.02) {
+                                        val measuredText = String.format(Locale.ROOT, "%.2f", measuredWidth)
+                                        Log.i(
+                                            TAG,
+                                            "DESKTOP_VIEWPORT_ZOOM_CALIBRATED window=${activeWindow.id} cssWidth=$measuredText targetCssWidth=$targetCssWidth attempts=$attempt"
+                                        )
+                                    } else if (attempt >= 2) {
+                                        val measuredText = String.format(Locale.ROOT, "%.2f", measuredWidth)
+                                        Log.w(
+                                            TAG,
+                                            "DESKTOP_VIEWPORT_ZOOM_CALIBRATION_INCOMPLETE window=${activeWindow.id} cssWidth=$measuredText targetCssWidth=$targetCssWidth attempts=$attempt"
+                                        )
+                                    } else {
+                                        // CSS viewport width is inversely proportional to the
+                                        // native zoom factor (1.2^level). Correct from the
+                                        // measured value instead of assuming density is exact.
+                                        val correctionLevel = kotlin.math.ln(errorRatio) / kotlin.math.ln(1.2)
+                                        val correctedZoomLevel = (currentZoomLevel + correctionLevel).coerceIn(-10.0, 0.0)
+                                        browserSlot.post {
+                                            if (isCurrentCalibration()) {
+                                                target.setZoomLevel(correctedZoomLevel)
+                                                val measuredText = String.format(Locale.ROOT, "%.2f", measuredWidth)
+                                                val correctionText = String.format(Locale.ROOT, "%.4f", correctionLevel)
+                                                val correctedText = String.format(Locale.ROOT, "%.4f", correctedZoomLevel)
+                                                Log.i(
+                                                    TAG,
+                                                    "DESKTOP_VIEWPORT_ZOOM_CALIBRATION_APPLIED window=${activeWindow.id} measuredCssWidth=$measuredText targetCssWidth=$targetCssWidth correctionLevel=$correctionText zoomLevel=$correctedText attempt=${attempt + 1}"
+                                                )
+                                                verifyAndCalibrate(attempt + 1, correctedZoomLevel)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }.onFailure { error ->
+                            Log.w(TAG, "DESKTOP_VIEWPORT_ZOOM_MEASURE_FAILED window=${activeWindow.id} attempt=$attempt", error)
+                        }
+                    }
+                }, 450L)
             }
+
+            verifyAndCalibrate(0, initialZoomLevel)
         }
 
-        // During an explicit PC-mode toggle the Surface is already measured, so send
-        // the metrics command immediately before the subsequent loadUrl call. Restored
-        // desktop tabs can arrive before layout; in that case wait for their first size.
+        // Apply synchronously during a user toggle when the Surface is measured, so
+        // the first desktop navigation starts at the fitted scale. Restored tabs wait
+        // for layout and use the same calibration once the Surface is ready.
         if (browserSlot.width > 0 && browserSlot.height > 0) {
             applyWhenSurfaceIsReady(0)
         } else {

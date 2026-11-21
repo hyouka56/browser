@@ -234,7 +234,8 @@ wait_for_log "PAGE_LOAD_STATE loading=false" 1 120
 wait_for_log "DESKTOP_SITE_INITIAL_STATE window=1 enabled=false" 1 30
 tap_accessibility_node_with_system_recovery desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 1 30
-wait_for_log "DESKTOP_VIEWPORT_METRICS_APPLIED window=1" 1 30
+wait_for_log "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" 1 30
+wait_for_log "DESKTOP_VIEWPORT_ZOOM_CALIBRATED window=1" 1 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 2 120
 wait_for_log "PAGE_BITMAP_CAPTURED url=https://example.com/" 2 90
 wait_for_log "DESKTOP_DOM_DIAGNOSTICS window=1" 1 30
@@ -242,9 +243,9 @@ if ! dismiss_external_anr_dialog_if_present; then
   echo "Could not safely dismiss an external system ANR before desktop-mode screenshot capture." >&2
   exit 1
 fi
-DESKTOP_METRICS_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_VIEWPORT_METRICS_APPLIED window=1" | tail -n1 || true)"
-if [[ ! "$DESKTOP_METRICS_LOG" =~ cssWidth=1280 ]] || [[ ! "$DESKTOP_METRICS_LOG" =~ dontSetVisibleSize=true ]]; then
-  echo "Expected desktop-mode metrics to fit 1280 CSS pixels without resizing the native Surface; got: $DESKTOP_METRICS_LOG" >&2
+DESKTOP_ZOOM_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" | tail -n1 || true)"
+if [[ ! "$DESKTOP_ZOOM_LOG" =~ targetCssWidth=1280 ]]; then
+  echo "Expected native page zoom to fit a 1280 CSS-pixel desktop viewport; got: $DESKTOP_ZOOM_LOG" >&2
   adb logcat -d -s Browser:V >&2 || true
   exit 1
 fi
@@ -268,20 +269,16 @@ if width < 1200 or client < 1200:
     raise SystemExit(f"Desktop CSS viewport is not wide enough for the 1280px target: {data}")
 if width > 1360 or client > 1360:
     raise SystemExit(f"Desktop CSS viewport was over-corrected: {data}")
-dpr = float(data.get("devicePixelRatio", 0))
-screen = int(data.get("screenWidth", 0))
-if screen < 1200 or not 0.1 <= dpr <= 1.0:
-    raise SystemExit(f"Desktop emulated screen/DPR was not applied: {data}")
 if scroll > client + 8:
     raise SystemExit(f"Desktop page still overflows horizontally: {data}")
-print(f"PASS: desktop DOM rendered at {width}px with no horizontal overflow")
+print(f"PASS: native zoom fitted the full desktop DOM viewport to {width}px with no horizontal overflow")
 PY
 sleep 1
 adb exec-out screencap -p > "$ARTIFACTS/desktop-site-scaled.png"
 tap_accessibility_node_with_system_recovery desc "Desktop site enabled."
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=false" 1 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 3 120
-wait_for_log "MOBILE_VIEWPORT_METRICS_CLEARED window=1" 1 30
+wait_for_log "MOBILE_VIEWPORT_ZOOM_RESET window=1" 1 30
 wait_for_log "MOBILE_VIEWPORT_DIAGNOSTICS window=1 innerWidth=" 2 30
 MOBILE_DOM_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "MOBILE_VIEWPORT_DIAGNOSTICS window=1" | tail -n1 || true)"
 python3 - "$MOBILE_DOM_LOG" <<'PY' | tee -a "$ARTIFACTS/desktop-site-results.txt"
@@ -290,6 +287,21 @@ match = re.search(r"innerWidth=(\d+)", sys.argv[1])
 if not match or int(match.group(1)) > 600:
     raise SystemExit(f"Mobile CSS viewport was not restored after disabling desktop mode: {sys.argv[1]}")
 print(f"PASS: mobile CSS viewport restored to {match.group(1)}px")
+PY
+wait_for_log "MOBILE_USER_AGENT_DIAGNOSTICS window=1" 1 30
+MOBILE_UA_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "MOBILE_USER_AGENT_DIAGNOSTICS window=1" | tail -n1 || true)"
+python3 - "$MOBILE_UA_LOG" <<'PY' | tee -a "$ARTIFACTS/desktop-site-results.txt"
+import json, re, sys
+match = re.search(r"result=(.*)$", sys.argv[1])
+if not match:
+    raise SystemExit(f"Mobile user-agent diagnostics missing: {sys.argv[1]}")
+data = json.loads(match.group(1))
+if isinstance(data, str):
+    data = json.loads(data)
+ua = data.get("userAgent", "")
+if "Windows NT" in ua or data.get("mobile") is not True:
+    raise SystemExit(f"Desktop user-agent was not cleared after disabling PC mode: {data}")
+print("PASS: default mobile user-agent and mobile UA metadata restored after disabling PC mode")
 PY
 printf 'PASS: PC control switched desktop mode on and back to mobile mode.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
 
@@ -794,8 +806,9 @@ report = {
         "cefrium_chromium_engine_logged": "CEF_ENGINE version=0.21.0 chromium=156.0.8078.96" in log,
         "page_title_verified": "PAGE_TITLE window=1 title=Example Domain" in log,
         "page_load_completed": "PAGE_LOAD_STATE loading=false" in log,
-        "desktop_css_viewport_fits_1280px_without_overflow": "PASS: desktop DOM rendered at 1280px with no horizontal overflow" in desktop_site_results,
+        "desktop_css_viewport_fits_1280px_without_overflow": "PASS: native zoom fitted the full desktop DOM viewport to 1280px with no horizontal overflow" in desktop_site_results,
         "mobile_css_viewport_restored_after_disabling_desktop_mode": "PASS: mobile CSS viewport restored to" in desktop_site_results,
+        "mobile_user_agent_restored_after_disabling_desktop_mode": "PASS: default mobile user-agent and mobile UA metadata restored after disabling PC mode" in desktop_site_results,
         "desktop_site_toggle_returns_to_mobile_mode": "PASS: PC control switched desktop mode on and back to mobile mode." in desktop_site_results,
         "android_open_with_lists_browser_for_html_and_xhtml": (
             (folder / "open-with-results.txt").is_file() and
