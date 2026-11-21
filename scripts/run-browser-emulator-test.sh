@@ -323,6 +323,10 @@ adb shell am start --activity-single-top -W -n "$ACTIVITY" -a android.intent.act
 wait_for_log "PAGE_LOAD_STATE loading=false" 4 120
 wait_for_log "MOBILE_USER_AGENT_DIAGNOSTICS window=1" 3 45
 sleep 3
+if ! dismiss_external_anr_dialog_if_present; then
+  echo "Could not safely dismiss an external system ANR before Google screenshot capture." >&2
+  exit 1
+fi
 adb exec-out screencap -p > "$ARTIFACTS/google-mobile-search.png"
 adb shell uiautomator dump /sdcard/google-mobile-search.xml >/dev/null 2>&1
 adb exec-out cat /sdcard/google-mobile-search.xml > "$ARTIFACTS/google-mobile-search-ui.xml"
@@ -339,6 +343,10 @@ wait_for_log "PAGE_LOAD_STATE loading=false" 5 120
 wait_for_log "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" 2 45
 wait_for_log "DESKTOP_DOM_DIAGNOSTICS window=1" 2 45
 sleep 3
+if ! dismiss_external_anr_dialog_if_present; then
+  echo "Could not safely dismiss an external system ANR before Google screenshot capture." >&2
+  exit 1
+fi
 adb exec-out screencap -p > "$ARTIFACTS/google-desktop-search.png"
 adb shell uiautomator dump /sdcard/google-desktop-search.xml >/dev/null 2>&1
 adb exec-out cat /sdcard/google-desktop-search.xml > "$ARTIFACTS/google-desktop-search-ui.xml"
@@ -378,6 +386,10 @@ wait_for_log "MOBILE_VIEWPORT_ZOOM_RESET window=1" 2 30
 wait_for_log "MOBILE_VIEWPORT_DIAGNOSTICS window=1 innerWidth=" 4 30
 wait_for_log "MOBILE_USER_AGENT_DIAGNOSTICS window=1" 4 45
 sleep 3
+if ! dismiss_external_anr_dialog_if_present; then
+  echo "Could not safely dismiss an external system ANR before Google screenshot capture." >&2
+  exit 1
+fi
 adb exec-out screencap -p > "$ARTIFACTS/google-mobile-search-restored.png"
 MOBILE_GOOGLE_UA_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "MOBILE_USER_AGENT_DIAGNOSTICS window=1" | tail -n1 || true)"
 python3 - "$MOBILE_GOOGLE_UA_LOG" <<'PY' | tee -a "$ARTIFACTS/desktop-site-results.txt"
@@ -403,6 +415,10 @@ printf 'PASS: PC control switched desktop mode on and back to mobile mode on Goo
 # Focus the restored Google search field and capture the exact state in which its keyboard controls should be visible.
 tap_accessibility_node_with_system_recovery text "hi"
 sleep 2
+if ! dismiss_external_anr_dialog_if_present; then
+  echo "Could not safely dismiss an external system ANR before Google screenshot capture." >&2
+  exit 1
+fi
 adb exec-out screencap -p > "$ARTIFACTS/google-mobile-search-focused.png"
 adb shell uiautomator dump /sdcard/google-mobile-search-focused.xml >/dev/null 2>&1
 adb exec-out cat /sdcard/google-mobile-search-focused.xml > "$ARTIFACTS/google-mobile-search-focused-ui.xml"
