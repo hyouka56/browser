@@ -26,6 +26,12 @@ collect_evidence() {
 trap collect_evidence EXIT
 
 adb wait-for-device
+# Match the OPPO A73 (CPH2095) physical panel for a device-geometry reproduction.
+# OPPO Egypt lists 1080x2400 and 408 PPI; Android density is approximated here
+# with 408 dpi because the production ColorOS density override is not observable
+# from CI. This is a geometry test, not a ColorOS firmware clone.
+adb shell wm size 1080x2400
+adb shell wm density 408
 ACTUAL_API="$(adb shell getprop ro.build.version.sdk | tr -d '\r')"
 if [[ "$ACTUAL_API" != "$EXPECTED_API" ]]; then
   echo "Expected Android API $EXPECTED_API but emulator reports $ACTUAL_API" >&2
@@ -37,6 +43,8 @@ fi
   echo "Actual API: $ACTUAL_API"
   echo "ABI list: $(adb shell getprop ro.product.cpu.abilist | tr -d '\r')"
   echo "Device: $(adb shell getprop ro.product.model | tr -d '\r')"
+  echo "Screen size override: $(adb shell wm size | tr -d '\r' | tr '\n' ';')"
+  echo "Screen density override: $(adb shell wm density | tr -d '\r' | tr '\n' ';')"
 } | tee "$ARTIFACTS/device.txt"
 
 adb logcat -c
@@ -323,6 +331,10 @@ adb shell am start --activity-single-top -W -n "$ACTIVITY" -a android.intent.act
 wait_for_log "PAGE_LOAD_STATE loading=false" 4 120
 wait_for_log "MOBILE_USER_AGENT_DIAGNOSTICS window=1" 3 45
 sleep 3
+if ! dismiss_external_anr_dialog_if_present; then
+  echo "Could not safely dismiss an external system ANR before Google screenshot capture." >&2
+  exit 1
+fi
 adb exec-out screencap -p > "$ARTIFACTS/google-mobile-search.png"
 adb shell uiautomator dump /sdcard/google-mobile-search.xml >/dev/null 2>&1
 adb exec-out cat /sdcard/google-mobile-search.xml > "$ARTIFACTS/google-mobile-search-ui.xml"
@@ -339,6 +351,10 @@ wait_for_log "PAGE_LOAD_STATE loading=false" 5 120
 wait_for_log "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" 2 45
 wait_for_log "DESKTOP_DOM_DIAGNOSTICS window=1" 2 45
 sleep 3
+if ! dismiss_external_anr_dialog_if_present; then
+  echo "Could not safely dismiss an external system ANR before Google screenshot capture." >&2
+  exit 1
+fi
 adb exec-out screencap -p > "$ARTIFACTS/google-desktop-search.png"
 adb shell uiautomator dump /sdcard/google-desktop-search.xml >/dev/null 2>&1
 adb exec-out cat /sdcard/google-desktop-search.xml > "$ARTIFACTS/google-desktop-search-ui.xml"
@@ -378,6 +394,10 @@ wait_for_log "MOBILE_VIEWPORT_ZOOM_RESET window=1" 2 30
 wait_for_log "MOBILE_VIEWPORT_DIAGNOSTICS window=1 innerWidth=" 4 30
 wait_for_log "MOBILE_USER_AGENT_DIAGNOSTICS window=1" 4 45
 sleep 3
+if ! dismiss_external_anr_dialog_if_present; then
+  echo "Could not safely dismiss an external system ANR before Google screenshot capture." >&2
+  exit 1
+fi
 adb exec-out screencap -p > "$ARTIFACTS/google-mobile-search-restored.png"
 MOBILE_GOOGLE_UA_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "MOBILE_USER_AGENT_DIAGNOSTICS window=1" | tail -n1 || true)"
 python3 - "$MOBILE_GOOGLE_UA_LOG" <<'PY' | tee -a "$ARTIFACTS/desktop-site-results.txt"
@@ -399,6 +419,26 @@ if [[ ! -s "$ARTIFACTS/google-mobile-search-restored.png" ]] || [[ "$(wc -c < "$
 fi
 printf 'PASS: Google search was tested in mobile and PC modes; desktop and restored-mobile screenshots captured.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
 printf 'PASS: PC control switched desktop mode on and back to mobile mode on Google.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
+
+# Focus the restored Google search field and capture the exact state in which its keyboard controls should be visible.
+tap_accessibility_node_with_system_recovery text "hi"
+sleep 2
+if ! dismiss_external_anr_dialog_if_present; then
+  echo "Could not safely dismiss an external system ANR before Google screenshot capture." >&2
+  exit 1
+fi
+adb exec-out screencap -p > "$ARTIFACTS/google-mobile-search-focused.png"
+adb shell uiautomator dump /sdcard/google-mobile-search-focused.xml >/dev/null 2>&1
+adb exec-out cat /sdcard/google-mobile-search-focused.xml > "$ARTIFACTS/google-mobile-search-focused-ui.xml"
+python3 - "$ARTIFACTS/google-mobile-search-focused-ui.xml" <<'PY' | tee -a "$ARTIFACTS/desktop-site-results.txt"
+import sys
+import xml.etree.ElementTree as ET
+root = ET.parse(sys.argv[1]).getroot()
+focused = any(node.attrib.get('class') == 'android.widget.EditText' and node.attrib.get('text') == 'hi' and node.attrib.get('focused') == 'true' for node in root.iter('node'))
+if not focused:
+    raise SystemExit('Google restored mobile search input did not receive focus')
+print('PASS: Google mobile search field focused after PC mode restore; keyboard-control screenshot captured')
+PY
 
 # A normal launch must open Android's default-browser chooser without a toolbar button.
 adb logcat -c
@@ -914,6 +954,12 @@ report = {
             "PASS: Google mobile user-agent, viewport and mobile metadata restored after PC mode." in desktop_site_results and
             (folder / "google-mobile-search-restored.png").is_file() and
             (folder / "google-mobile-search-restored.png").stat().st_size > 10000
+        ),
+        "google_mobile_search_field_focused_after_pc_restore": (
+            "PASS: Google mobile search field focused after PC mode restore; keyboard-control screenshot captured" in desktop_site_results and
+            (folder / "google-mobile-search-focused.png").is_file() and
+            (folder / "google-mobile-search-focused-ui.xml").is_file() and
+            (folder / "google-mobile-search-focused.png").stat().st_size > 10000
         ),
         "desktop_site_toggle_returns_to_mobile_mode": "PASS: PC control switched desktop mode on and back to mobile mode on Google." in desktop_site_results,
         "android_open_with_lists_browser_for_html_and_xhtml": (
