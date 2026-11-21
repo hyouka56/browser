@@ -480,34 +480,42 @@ class MainActivity : AppCompatActivity() {
                         browserSlot.postDelayed({ captureAndVerifyPage(instance, pageUrl) }, 1000L)
                         if (window.desktopMode && (pageUrl.startsWith("https://") || pageUrl.startsWith("http://"))) {
                             browserSlot.postDelayed({
-                                if (activeWindowId == windowId && browser === instance && window.desktopMode) {
-                                    instance.evaluateJavaScript(
-                                        """JSON.stringify({
-                                            readyState: document.readyState,
-                                            title: document.title || "",
-                                            bodyText: (document.body?.innerText || "").trim().slice(0, 240),
-                                            innerWidth: window.innerWidth,
-                                            screenWidth: screen.width,
-                                            devicePixelRatio: window.devicePixelRatio,
-                                            clientWidth: document.documentElement?.clientWidth || 0,
-                                            scrollWidth: document.documentElement?.scrollWidth || 0,
-                                            visualViewportWidth: Math.round(window.visualViewport?.width || 0),
-                                            screenHeight: screen.height
-                                        })"""
-                                    ) { result ->
-                                        Log.i(TAG, "DESKTOP_DOM_DIAGNOSTICS window=$windowId result=${result.orEmpty()}")
+                                if (isActiveBrowserForDiagnostics(windowId, instance, expectedDesktopMode = true)) {
+                                    runCatching {
+                                        instance.evaluateJavaScript(
+                                            """JSON.stringify({
+                                                readyState: document.readyState,
+                                                title: document.title || "",
+                                                bodyText: (document.body?.innerText || "").trim().slice(0, 240),
+                                                innerWidth: window.innerWidth,
+                                                screenWidth: screen.width,
+                                                devicePixelRatio: window.devicePixelRatio,
+                                                clientWidth: document.documentElement?.clientWidth || 0,
+                                                scrollWidth: document.documentElement?.scrollWidth || 0,
+                                                visualViewportWidth: Math.round(window.visualViewport?.width || 0),
+                                                screenHeight: screen.height
+                                            })"""
+                                        ) { result ->
+                                            Log.i(TAG, "DESKTOP_DOM_DIAGNOSTICS window=$windowId result=${result.orEmpty()}")
+                                        }
+                                    }.onFailure { error ->
+                                        Log.w(TAG, "DESKTOP_DOM_DIAGNOSTICS_SKIPPED window=$windowId browser_closed=true", error)
                                     }
                                 }
                             }, 2500L)
                         }
                         if (!window.desktopMode && (pageUrl.startsWith("https://") || pageUrl.startsWith("http://"))) {
                             browserSlot.postDelayed({
-                                if (activeWindowId == windowId && browser === instance && !window.desktopMode) {
-                                    instance.evaluateJavaScript("window.innerWidth") { result ->
-                                        Log.i(
-                                            TAG,
-                                            "MOBILE_VIEWPORT_DIAGNOSTICS window=$windowId innerWidth=${result.orEmpty()}"
-                                        )
+                                if (isActiveBrowserForDiagnostics(windowId, instance, expectedDesktopMode = false)) {
+                                    runCatching {
+                                        instance.evaluateJavaScript("window.innerWidth") { result ->
+                                            Log.i(
+                                                TAG,
+                                                "MOBILE_VIEWPORT_DIAGNOSTICS window=$windowId innerWidth=${result.orEmpty()}"
+                                            )
+                                        }
+                                    }.onFailure { error ->
+                                        Log.w(TAG, "MOBILE_VIEWPORT_DIAGNOSTICS_SKIPPED window=$windowId browser_closed=true", error)
                                     }
                                 }
                             }, 1200L)
@@ -516,19 +524,25 @@ class MainActivity : AppCompatActivity() {
                             isLocalHtmlDocument
                         ) {
                             browserSlot.postDelayed({
-                                instance.evaluateJavaScript(
-                                    """JSON.stringify({
-                                        readyState: document.readyState,
-                                        title: document.title || "",
-                                        bodyText: (document.body?.textContent || "").trim(),
-                                        location: location.href
-                                    })"""
-                                ) { result ->
-                                    val diagnostics = result.orEmpty()
-                                    val verified = diagnostics.contains("Local HTML Test") &&
-                                        diagnostics.contains("Local HTML file rendered successfully")
-                                    Log.i(TAG, "LOCAL_HTML_DOM_DIAGNOSTICS result=$diagnostics")
-                                    Log.i(TAG, "LOCAL_HTML_DOCUMENT_VERIFIED success=$verified")
+                                if (isActiveBrowserForDiagnostics(windowId, instance, expectedDesktopMode = window.desktopMode)) {
+                                    runCatching {
+                                        instance.evaluateJavaScript(
+                                            """JSON.stringify({
+                                                readyState: document.readyState,
+                                                title: document.title || "",
+                                                bodyText: (document.body?.textContent || "").trim(),
+                                                location: location.href
+                                            })"""
+                                        ) { result ->
+                                            val diagnostics = result.orEmpty()
+                                            val verified = diagnostics.contains("Local HTML Test") &&
+                                                diagnostics.contains("Local HTML file rendered successfully")
+                                            Log.i(TAG, "LOCAL_HTML_DOM_DIAGNOSTICS result=$diagnostics")
+                                            Log.i(TAG, "LOCAL_HTML_DOCUMENT_VERIFIED success=$verified")
+                                        }
+                                    }.onFailure { error ->
+                                        Log.w(TAG, "LOCAL_HTML_DOM_DIAGNOSTICS_SKIPPED window=$windowId browser_closed=true", error)
+                                    }
                                 }
                             }, 500L)
                         }
@@ -852,12 +866,28 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private fun isActiveBrowserForDiagnostics(
+        windowId: Int,
+        target: CefriumBrowser,
+        expectedDesktopMode: Boolean
+    ): Boolean {
+        if (activityDestroying || isFinishing || isDestroyed || activeWindowId != windowId ||
+            !::browser.isInitialized || browser !== target
+        ) return false
+
+        return browserWindows.any { window ->
+            window.id == windowId && window.browser === target && window.desktopMode == expectedDesktopMode
+        }
+    }
+
     private fun captureAndVerifyPage(instance: CefriumBrowser, url: String) {
-        if (isFinishing || isDestroyed || showingDownloads ||
-            !::browser.isInitialized || browser !== instance
+        if (activityDestroying || isFinishing || isDestroyed || showingDownloads ||
+            !::browser.isInitialized || browser !== instance ||
+            browserWindows.none { it.browser === instance }
         ) return
 
-        instance.captureBitmap { bitmap ->
+        runCatching {
+            instance.captureBitmap { bitmap ->
             if (!::browser.isInitialized || browser !== instance) {
                 bitmap?.recycle()
                 return@captureBitmap
@@ -891,6 +921,9 @@ class MainActivity : AppCompatActivity() {
 
             // captureBitmap may omit Surface-backed compositor pixels on some Android
             // releases. Use load-state and device screenshots for page verification.
+            }
+        }.onFailure { error ->
+            Log.w(TAG, "PAGE_BITMAP_CAPTURE_SKIPPED url=$url because the browser window is no longer available", error)
         }
     }
 

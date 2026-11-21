@@ -249,7 +249,7 @@ if [[ ! "$DESKTOP_METRICS_LOG" =~ cssWidth=1280 ]] || [[ ! "$DESKTOP_METRICS_LOG
   exit 1
 fi
 DESKTOP_DOM_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_DOM_DIAGNOSTICS window=1" | tail -n1 || true)"
-python3 - "$DESKTOP_DOM_LOG" <<'PY'
+python3 - "$DESKTOP_DOM_LOG" <<'PY' | tee -a "$ARTIFACTS/desktop-site-results.txt"
 import json, re, sys
 line = sys.argv[1]
 match = re.search(r"result=(.*)$", line)
@@ -284,14 +284,14 @@ wait_for_log "PAGE_LOAD_STATE loading=false" 3 120
 wait_for_log "MOBILE_VIEWPORT_METRICS_CLEARED window=1" 1 30
 wait_for_log "MOBILE_VIEWPORT_DIAGNOSTICS window=1 innerWidth=" 2 30
 MOBILE_DOM_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "MOBILE_VIEWPORT_DIAGNOSTICS window=1" | tail -n1 || true)"
-python3 - "$MOBILE_DOM_LOG" <<'PY'
+python3 - "$MOBILE_DOM_LOG" <<'PY' | tee -a "$ARTIFACTS/desktop-site-results.txt"
 import re, sys
 match = re.search(r"innerWidth=(\d+)", sys.argv[1])
 if not match or int(match.group(1)) > 600:
     raise SystemExit(f"Mobile CSS viewport was not restored after disabling desktop mode: {sys.argv[1]}")
 print(f"PASS: mobile CSS viewport restored to {match.group(1)}px")
 PY
-printf 'PASS: PC control switched desktop mode on and back to mobile mode.\n' | tee "$ARTIFACTS/desktop-site-results.txt"
+printf 'PASS: PC control switched desktop mode on and back to mobile mode.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
 
 # A normal launch must open Android's default-browser chooser without a toolbar button.
 adb logcat -c
@@ -748,6 +748,8 @@ ratio_before, dark_ratio_before, light_ratio_before = visible_content_ratio(befo
 ratio_after, dark_ratio_after, light_ratio_after = visible_content_ratio(after) if after.is_file() else (0.0, 0.0, 0.0)
 adblock_results_path = folder / "adblock-results.txt"
 adblock_result_lines = adblock_results_path.read_text().splitlines() if adblock_results_path.is_file() else []
+desktop_site_results_path = folder / "desktop-site-results.txt"
+desktop_site_results = desktop_site_results_path.read_text(errors="replace") if desktop_site_results_path.is_file() else ""
 local_html_log_path = folder / "local-html-open-logcat.txt"
 local_html_log = local_html_log_path.read_text(errors="replace") if local_html_log_path.is_file() else ""
 
@@ -792,6 +794,9 @@ report = {
         "cefrium_chromium_engine_logged": "CEF_ENGINE version=0.21.0 chromium=156.0.8078.96" in log,
         "page_title_verified": "PAGE_TITLE window=1 title=Example Domain" in log,
         "page_load_completed": "PAGE_LOAD_STATE loading=false" in log,
+        "desktop_css_viewport_fits_1280px_without_overflow": "PASS: desktop DOM rendered at 1280px with no horizontal overflow" in desktop_site_results,
+        "mobile_css_viewport_restored_after_disabling_desktop_mode": "PASS: mobile CSS viewport restored to" in desktop_site_results,
+        "desktop_site_toggle_returns_to_mobile_mode": "PASS: PC control switched desktop mode on and back to mobile mode." in desktop_site_results,
         "android_open_with_lists_browser_for_html_and_xhtml": (
             (folder / "open-with-results.txt").is_file() and
             "PASS: Android Open with resolver includes Browser for HTML and XHTML files." in
