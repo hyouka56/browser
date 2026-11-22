@@ -1382,7 +1382,9 @@ class MainActivity : AppCompatActivity() {
         activeWindow.url = currentUrl
         lastRequestedUrl = currentUrl
         searchField.setText(currentUrl)
-        updateDesktopSiteButton()
+        // Do not refresh this control while MainActivity.browser still points to
+        // the renderer that was just closed. attachBrowser() assigns the replacement
+        // first and then updates the control against the live renderer.
         attachBrowser(
             currentUrl,
             incognito = activeWindow.incognito,
