@@ -857,14 +857,13 @@ class MainActivity : AppCompatActivity() {
 
         when {
             restoreNavigationState != null -> {
-                // Restore the complete history/PageState on a fresh renderer, then reload
-                // the restored current entry to start its navigation on the new renderer.
-                // Cefrium restores the NavigationController stack but does not emit a new
-                // load/paint callback until the restored entry is explicitly reloaded.
+                // Restore the full back/forward stack before the OSR browser's first
+                // navigation. OSR creates its native CEF browser lazily on loadUrl();
+                // reload() is a no-op here because no current page exists yet.
                 instance.restoreNavigationState(restoreNavigationState)
                 Log.i(TAG, "BROWSER_NAVIGATION_STATE_RESTORED window=$windowId bytes=${restoreNavigationState.size}")
-                instance.reload()
-                Log.i(TAG, "BROWSER_NAVIGATION_STATE_RELOAD_REQUESTED window=$windowId")
+                instance.loadUrl(initialUrl)
+                Log.i(TAG, "BROWSER_NAVIGATION_STATE_INITIAL_LOAD_REQUESTED window=$windowId url=$initialUrl")
             }
             restoreCurrentPageWhenStateMissing -> {
                 instance.loadUrl(initialUrl)
