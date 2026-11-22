@@ -33,6 +33,10 @@ The API 30, API 35, and API 36 emulator jobs install the x86_64 Debug APK, load 
 
 These emulator jobs do not claim to reproduce an ARM32 TV's memory, GPU driver, or OEM process-management behavior.
 
-## Build artifacts
+## Build artifacts and production signing
 
-GitHub Actions uploads signed Debug APKs for ARM32 TV Lite, ARM64, and x86_64 emulator testing. The workflow does not publish a GitHub Release or sign a production Release APK.
+The Android CI workflow uploads Debug APKs for ARM32 TV Lite, ARM64, and x86_64 emulator testing. Separate manually dispatched GitHub Actions workflows build production Release APKs with the repository's persistent Android signing key:
+- `release-arm64.yml`: production-signed ARM64 APK for 64-bit Android devices.
+- `release.yml`: production-signed ARM32 TV Lite APK.
+
+Each Release workflow validates the keystore, builds the Release variant, verifies the APK signature, and uploads the APK with its signing-certificate report as a workflow artifact. Publishing a GitHub Release and attaching the verified APK is a separate step.
