@@ -26,10 +26,9 @@ collect_evidence() {
 trap collect_evidence EXIT
 
 adb wait-for-device
-# Match OPPO A73 (CPH2095) screen geometry for this Android 12 reproduction.
-# 408 dpi is a logical-density approximation, not a ColorOS firmware clone.
+# Match the user's OPPO CPH2095 panel geometry and the emulator's native 440 dpi.
 adb shell wm size 1080x2400
-adb shell wm density 408
+adb shell wm density 440
 ACTUAL_API="$(adb shell getprop ro.build.version.sdk | tr -d '\r')"
 if [[ "$ACTUAL_API" != "$EXPECTED_API" ]]; then
   echo "Expected Android API $EXPECTED_API but emulator reports $ACTUAL_API" >&2
@@ -248,38 +247,38 @@ adb logcat -c
 adb shell am force-stop "$PACKAGE"
 adb shell am start -W -n "$ACTIVITY" \
   --es com.search.browser.TEST_URL "https://example.com/" \
+  --ez com.search.browser.TEST_DESKTOP_VIEWPORT true \
   2>&1 | tee "$ARTIFACTS/desktop-site-launch.txt"
-wait_for_log "PAGE_TITLE window=1 title=Example Domain" 1 120
+wait_for_log "PAGE_TITLE window=1 title=OSR_EDGE_FIXTURE_READY" 1 120
 wait_for_log "PAGE_LOAD_STATE loading=false" 1 120
 wait_for_log "DESKTOP_SITE_INITIAL_STATE window=1 enabled=false" 1 30
 wait_for_log "MOBILE_USER_AGENT_BASELINE_CAPTURED window=1" 1 30
 tap_accessibility_node_with_system_recovery desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 1 30
-wait_for_log "DESKTOP_PAGE_SCALE_RESET window=1 success=true" 1 30
-wait_for_log "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" 1 30
+wait_for_log "BROWSER_RESUMED_ON_ATTACH window=1 desktop=true" 1 30
+wait_for_log "BROWSER_NAVIGATION_STATE_INITIAL_LOAD_REQUESTED window=1" 1 30
+wait_for_log "DESKTOP_OSR_VIEWPORT_READY window=1" 1 45
+wait_for_log "DESKTOP_OSR_FIRST_FRAME width=1080" 1 45
 wait_for_log "PAGE_LOAD_STATE loading=false" 2 120
-wait_for_log "PAGE_BITMAP_CAPTURED url=https://example.com/" 2 90
-wait_for_log "DESKTOP_DOM_DIAGNOSTICS window=1" 1 30
+wait_for_log "DESKTOP_DOM_DIAGNOSTICS window=1" 1 45
 if ! dismiss_external_anr_dialog_if_present; then
-  echo "Could not safely dismiss an external system ANR before desktop-mode screenshot capture." >&2
+  echo "Could not safely dismiss an external system ANR before OSR desktop screenshot capture." >&2
   exit 1
 fi
-DESKTOP_ZOOM_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" | tail -n1 || true)"
-if [[ ! "$DESKTOP_ZOOM_LOG" =~ targetCssWidth=1280 ]] || [[ ! "$DESKTOP_ZOOM_LOG" =~ appliedAfterLoad=true ]]; then
-  echo "Expected native page zoom to be applied after navigation for a 1280 CSS-pixel desktop target; got: $DESKTOP_ZOOM_LOG" >&2
+DESKTOP_OSR_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_OSR_VIEWPORT_READY window=1" | tail -n1 || true)"
+if [[ ! "$DESKTOP_OSR_LOG" =~ physicalWidth=1080 ]] || [[ ! "$DESKTOP_OSR_LOG" =~ cssWidth=1280.0 ]] || [[ ! "$DESKTOP_OSR_LOG" =~ rendering=offscreen ]]; then
+  echo "Expected a 1080px OSR output buffer mapped to a 1280px CSS desktop viewport; got: $DESKTOP_OSR_LOG" >&2
   adb logcat -d -s Browser:V >&2 || true
   exit 1
 fi
 DESKTOP_DOM_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_DOM_DIAGNOSTICS window=1" | tail -n1 || true)"
 python3 - "$DESKTOP_DOM_LOG" <<'PY' | tee -a "$ARTIFACTS/desktop-site-results.txt"
 import json, re, sys
-line = sys.argv[1]
-match = re.search(r"result=(.*)$", line)
+match = re.search(r"result=(.*)$", sys.argv[1])
 if not match:
-    raise SystemExit(f"Desktop DOM diagnostics did not return JSON: {line}")
+    raise SystemExit(f"Desktop DOM diagnostics did not return JSON: {sys.argv[1]}")
 data = json.loads(match.group(1))
-if isinstance(data, str):
-    data = json.loads(data)
+if isinstance(data, str): data = json.loads(data)
 body = data.get("bodyText", "")
 width = int(data.get("innerWidth", 0))
 client = int(data.get("clientWidth", 0))
@@ -287,23 +286,75 @@ scroll = int(data.get("scrollWidth", 0))
 visual = float(data.get("visualViewportWidth", 0))
 visual_scale = float(data.get("visualViewportScale", 0))
 dpr = float(data.get("devicePixelRatio", 0))
-if "Example Domain" not in data.get("title", "") or "This domain is for use in documentation examples" not in body:
-    raise SystemExit(f"Desktop page content is missing: {data}")
-if width < 768 or client < 768:
-    raise SystemExit(f"Desktop CSS viewport did not reach the wide layout breakpoint: {data}")
+expected_dpr = 1080 / 1280
+if data.get("title") != "OSR_EDGE_FIXTURE_READY" or "PC viewport edge fixture ready" not in body:
+    raise SystemExit(f"Desktop edge fixture did not run: {data}")
+if abs(width - 1280) > 8 or abs(client - 1280) > 8:
+    raise SystemExit(f"Desktop CSS viewport is not 1280px: {data}")
 if abs(visual - width) > max(8, width * 0.02):
     raise SystemExit(f"Visual viewport is narrower than the CSS layout viewport: {data}")
 if abs(visual_scale - 1.0) > 0.05:
-    raise SystemExit(f"Page scale was not reset to 1.0: {data}")
-if abs(dpr - 1.0) > 0.05:
-    raise SystemExit(f"Desktop DPR is not the ordinary 1.0 scale: {data}")
+    raise SystemExit(f"Unexpected visual page scale: {data}")
+if abs(dpr - expected_dpr) > 0.01:
+    raise SystemExit(f"OSR device scale factor is not 1080/1280: {data}")
 if scroll > client + 8:
-    raise SystemExit(f"Desktop page still overflows horizontally: {data}")
-print(f"PASS: desktop page rendered at {width}px; visualViewport={visual}px, pageScale={visual_scale:.3f}, DPR={dpr:.3f}; no horizontal overflow")
+    raise SystemExit(f"Desktop fixture overflows horizontally: {data}")
+print(f"PASS: desktop page rendered at {width}px CSS; visualViewport spans the full layout viewport; pageScale={visual_scale:.3f}; OSR DPR={dpr:.5f} (1080/1280); no horizontal overflow")
 PY
 sleep 1
-adb exec-out screencap -p > "$ARTIFACTS/desktop-site-scaled.png"
-tap_accessibility_node_with_system_recovery desc "Desktop site enabled."
+adb exec-out screencap -p > "$ARTIFACTS/desktop-site-osr.png"
+python3 - "$ARTIFACTS/desktop-site-osr.png" "$ARTIFACTS/osr-edge-tap-centre.txt" <<'PY' | tee -a "$ARTIFACTS/desktop-site-results.txt"
+import struct, sys, zlib
+from pathlib import Path
+source, tap_file = map(Path, sys.argv[1:])
+data = source.read_bytes()
+if data[:8] != b"\x89PNG\r\n\x1a\n": raise SystemExit("OSR screenshot is not a PNG")
+pos=8; width=height=depth=kind=interlace=None; compressed=bytearray()
+while pos < len(data):
+    n=struct.unpack(">I",data[pos:pos+4])[0]; typ=data[pos+4:pos+8]; payload=data[pos+8:pos+8+n]; pos += n+12
+    if typ==b"IHDR": width,height,depth,kind,_,_,interlace=struct.unpack(">IIBBBBB",payload)
+    elif typ==b"IDAT": compressed.extend(payload)
+    elif typ==b"IEND": break
+if depth != 8 or kind not in (2,6) or interlace != 0: raise SystemExit(f"Unsupported screenshot PNG: {depth=} {kind=} {interlace=}")
+channels=3 if kind==2 else 4; stride=width*channels; raw=zlib.decompress(compressed); rows=[]; previous=bytearray(stride); offset=0
+for _ in range(height):
+    filt=raw[offset]; row=bytearray(raw[offset+1:offset+1+stride]); offset += stride+1
+    for i in range(stride):
+        left=row[i-channels] if i>=channels else 0; up=previous[i]; ul=previous[i-channels] if i>=channels else 0
+        if filt==1: row[i]=(row[i]+left)&255
+        elif filt==2: row[i]=(row[i]+up)&255
+        elif filt==3: row[i]=(row[i]+((left+up)//2))&255
+        elif filt==4:
+            pred=left+up-ul; pa,pb,pc=abs(pred-left),abs(pred-up),abs(pred-ul)
+            row[i]=(row[i]+(left if pa<=pb and pa<=pc else up if pb<=pc else ul))&255
+        elif filt!=0: raise SystemExit(f"Unknown PNG filter {filt}")
+    rows.append(row); previous=row
+if width != 1080: raise SystemExit(f"Expected 1080 screenshot pixels, got {width}")
+# The magenta DOM marker is fixed at CSS right:0. It must occupy the screen's last columns.
+edge_pixels=sum(1 for y in range(height) for x in range(width-3,width) if rows[y][x*channels] > 220 and rows[y][x*channels+1] < 45 and rows[y][x*channels+2] > 220)
+last_column_pixels=sum(1 for y in range(height) if rows[y][(width-1)*channels] > 220 and rows[y][(width-1)*channels+1] < 45 and rows[y][(width-1)*channels+2] > 220)
+if edge_pixels < height//3 or last_column_pixels < height//3:
+    raise SystemExit(f"Right edge was not drawn to the physical screen boundary: {edge_pixels=}, {last_column_pixels=}, {width=}, {height=}")
+# Detect the teal button near the right edge, then tap its actual on-screen pixel centre.
+points=[]
+for y in range(height):
+    if y < height*0.20 or y > height*0.85: continue
+    row=rows[y]
+    for x in range(int(width*0.70),width-3):
+        i=x*channels; r,g,b=row[i],row[i+1],row[i+2]
+        if r < 70 and g > 145 and b > 90 and g-r > 100 and b-r > 60: points.append((x,y))
+if len(points) < 1000: raise SystemExit(f"Right-side test button was not fully visible: coloredPixels={len(points)}")
+x0=min(x for x,y in points); x1=max(x for x,y in points); y0=min(y for x,y in points); y1=max(y for x,y in points)
+if x0 < width*0.70 or x1 > width-6 or x1-x0 < 100 or y1-y0 < 35:
+    raise SystemExit(f"Right-side test button bounds are not visible/correct: {(x0,y0,x1,y1)}")
+tap_file.write_text(f"{(x0+x1)//2} {(y0+y1)//2}\n")
+print(f"PASS: OSR rendered the magenta edge marker through physical x={width-1} ({last_column_pixels} visible edge pixels); right-side button bounds={(x0,y0,x1,y1)}; tap centre={(x0+x1)//2},{(y0+y1)//2}")
+PY
+read -r OSR_TAP_X OSR_TAP_Y < "$ARTIFACTS/osr-edge-tap-centre.txt"
+adb shell input tap "$OSR_TAP_X" "$OSR_TAP_Y"
+wait_for_log "PAGE_TITLE window=1 title=OSR_EDGE_TAP_OK" 1 45
+printf 'PASS: a real Android tap near the right edge reached the OSR page button.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
+tap_accessibility_node_with_system_recovery desc "Desktop site enabled. Tap to use mobile site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=false" 1 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 3 120
 wait_for_log "MOBILE_USER_AGENT_OVERRIDE_RESTORED window=1" 1 30
@@ -356,8 +407,7 @@ printf 'PASS: Google search page loaded in mobile mode before the PC-mode test; 
 tap_accessibility_node_with_system_recovery desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 2 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 5 120
-wait_for_log "DESKTOP_PAGE_SCALE_RESET window=1 success=true" 2 45
-wait_for_log "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" 2 45
+wait_for_log "DESKTOP_OSR_VIEWPORT_READY window=1" 2 45
 wait_for_log "DESKTOP_DOM_DIAGNOSTICS window=1" 2 45
 sleep 3
 if ! dismiss_external_anr_dialog_if_present; then
@@ -390,8 +440,8 @@ if width < 768 or client < 768:
     raise SystemExit(f"Google did not switch to a desktop-width CSS viewport: {data}")
 if abs(visual - width) > max(8, width * 0.02):
     raise SystemExit(f"Google visual viewport is narrower than its layout viewport: {data}")
-if abs(visual_scale - 1.0) > 0.05 or abs(dpr - 1.0) > 0.05:
-    raise SystemExit(f"Google desktop page has unexpected zoom or DPR: {data}")
+if abs(visual_scale - 1.0) > 0.05 or abs(dpr - (1080 / 1280)) > 0.01:
+    raise SystemExit(f"Google desktop page has unexpected visual scale or OSR DPR: {data}")
 if scroll > client + 8:
     raise SystemExit(f"Google desktop page has horizontal overflow: {data}")
 print(f"PASS: Google desktop search page rendered in PC mode at {width}px; visualViewport={visual}px, pageScale={visual_scale:.3f}, DPR={dpr:.3f}; no horizontal overflow.")
@@ -434,7 +484,7 @@ if [[ ! -s "$ARTIFACTS/google-mobile-search-restored.png" ]] || [[ "$(wc -c < "$
   exit 1
 fi
 printf 'PASS: Google search was tested in mobile and PC modes; desktop and restored-mobile screenshots captured.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
-printf 'PASS: PC control switched desktop mode on and back to mobile mode on Google.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
+printf 'PASS: PC control switched desktop mode on and back to mobile mode on the edge fixture.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
 
 # Focus the restored Google search field and capture the exact state in which its keyboard controls should be visible.
 tap_accessibility_node_with_system_recovery text "hi"
@@ -472,9 +522,7 @@ adb exec-out screencap -p > "$ARTIFACTS/github-mobile-repository.png"
 tap_accessibility_node_with_system_recovery desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 3 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 8 120
-wait_for_log "DESKTOP_DEVICE_METRICS_APPLIED window=1" 3 45
-wait_for_log "DESKTOP_PAGE_SCALE_RESET window=1 success=true" 3 45
-wait_for_log "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" 3 45
+wait_for_log "DESKTOP_OSR_VIEWPORT_READY window=1" 3 45
 wait_for_log "DESKTOP_DOM_DIAGNOSTICS window=1" 3 45
 sleep 4
 if ! dismiss_external_anr_dialog_if_present; then
@@ -485,68 +533,34 @@ adb exec-out screencap -p > "$ARTIFACTS/github-desktop-repository.png"
 adb shell uiautomator dump /sdcard/github-desktop-repository.xml >/dev/null 2>&1
 adb exec-out cat /sdcard/github-desktop-repository.xml > "$ARTIFACTS/github-desktop-repository-ui.xml"
 GITHUB_DESKTOP_DOM_LOG="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F "DESKTOP_DOM_DIAGNOSTICS window=1" | tail -n1 || true)"
-python3 - "$GITHUB_DESKTOP_DOM_LOG" "$ARTIFACTS/github-desktop-repository-ui.xml" <<'PY' | tee -a "$ARTIFACTS/desktop-site-results.txt"
+python3 - "$GITHUB_DESKTOP_DOM_LOG" <<'PY' | tee -a "$ARTIFACTS/desktop-site-results.txt"
 import json, re, sys
 match = re.search(r"result=(.*)$", sys.argv[1])
-if not match:
-    raise SystemExit(f"GitHub PC-mode DOM diagnostics missing: {sys.argv[1]}")
+if not match: raise SystemExit(f"GitHub PC-mode DOM diagnostics missing: {sys.argv[1]}")
 data = json.loads(match.group(1))
-if isinstance(data, str):
-    data = json.loads(data)
-title = data.get("title", "")
-body = data.get("bodyText", "")
-inner = int(data.get("innerWidth", 0))
-client = int(data.get("clientWidth", 0))
-visual = float(data.get("visualViewportWidth", 0))
-visual_scale = float(data.get("visualViewportScale", 0))
-dpr = float(data.get("devicePixelRatio", 0))
-doc_scroll = int(data.get("scrollWidth", 0))
-body_client = int(data.get("bodyClientWidth", 0))
-body_scroll = int(data.get("bodyScrollWidth", 0))
-body_rect = int(data.get("bodyRectWidth", 0))
-doc_rect = int(data.get("documentRectWidth", 0))
-if not title.strip() or not body.strip() or "github" not in title.lower() and "browser" not in title.lower():
-    print(f"FAIL: GitHub repository page did not render in PC mode: {data}")
-else:
-    print(f"PASS: GitHub repository page loaded in PC mode; title={title!r}, innerWidth={inner}px, visualViewport={visual}px, pageScale={visual_scale:.3f}, DPR={dpr:.3f}, client={client}px, documentScroll={doc_scroll}px, bodyScroll={body_scroll}px, bodyRect={body_rect}px, documentRect={doc_rect}px")
+if isinstance(data, str): data = json.loads(data)
+title=data.get("title",""); body=data.get("bodyText","")
+inner=int(data.get("innerWidth",0)); client=int(data.get("clientWidth",0))
+visual=float(data.get("visualViewportWidth",0)); visual_scale=float(data.get("visualViewportScale",0))
+dpr=float(data.get("devicePixelRatio",0)); doc_scroll=int(data.get("scrollWidth",0))
+body_rect=int(data.get("bodyRectWidth",0)); doc_rect=int(data.get("documentElementRectWidth",0))
+repo_left=data.get("repoTitleLeft")
+if not title.strip() or not body.strip() or ("github" not in title.lower() and "browser" not in title.lower()):
+    raise SystemExit(f"GitHub repository page did not render in PC mode: {data}")
 if not 1200 <= inner <= 1360 or not 1200 <= client <= 1360:
-    print(f"FAIL: GitHub CSS viewport is not close to the requested 1280px: innerWidth={inner}, clientWidth={client}")
-else:
-    print(f"PASS: GitHub CSS viewport is {inner}px, close to the requested 1280px.")
-if abs(visual - inner) > max(8, inner * 0.02):
-    print(f"FAIL: GitHub visual viewport is narrower than its desktop layout viewport: visual={visual}, inner={inner}")
-else:
-    print(f"PASS: GitHub visual viewport spans the full layout viewport ({visual}px).")
-if abs(visual_scale - 1.0) > 0.05:
-    print(f"FAIL: GitHub page scale was not reset to 1.0: {visual_scale}")
-else:
-    print("PASS: GitHub page scale reset to 1.0.")
-if abs(dpr - 1.0) > 0.05:
-    print(f"FAIL: GitHub desktop DPR is not 1.0: {dpr}")
-else:
-    print("PASS: GitHub desktop DPR is 1.0.")
-# A full-width desktop layout must keep the repo's main content near the left edge.
-import xml.etree.ElementTree as ET
-ui_root = ET.parse(sys.argv[2]).getroot()
-repo_title = next((n for n in ui_root.iter("node") if n.attrib.get("resource-id") == "repo-title-component"), None)
-if repo_title is None:
-    print("FAIL: GitHub repo title container is missing from the visible hierarchy.")
-else:
-    bounds = re.search(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", repo_title.attrib.get("bounds", ""))
-    if not bounds:
-        print("FAIL: GitHub repo title has no measurable screen bounds.")
-    else:
-        left = int(bounds.group(1))
-        print(f"GitHub repo title starts at screen x={left}px.")
-        if left > 100:
-            print(f"FAIL: GitHub main content is shifted right ({left}px), reproducing the half-page layout.")
-        else:
-            print("PASS: GitHub main content begins near the left edge; no large blank left section.")
-overflow = max(doc_scroll, body_scroll, body_rect, doc_rect) > max(client, body_client, inner) + 8
-if overflow:
-    print(f"FAIL: GitHub desktop layout extends beyond its viewport: inner={inner}, client={client}, docScroll={doc_scroll}, bodyClient={body_client}, bodyScroll={body_scroll}, bodyRect={body_rect}, documentRect={doc_rect}")
-else:
-    print("PASS: GitHub desktop repository page has no horizontal document/body overflow.")
+    raise SystemExit(f"GitHub CSS viewport is not close to 1280px: {data}")
+if abs(visual-inner) > max(8,inner*0.02): raise SystemExit(f"GitHub visual viewport is narrower than its layout viewport: {data}")
+if abs(visual_scale-1.0)>0.05 or abs(dpr-(1080/1280))>0.01:
+    raise SystemExit(f"GitHub has unexpected visual scale or OSR DPR: {data}")
+overflow=doc_scroll>client+8 or body_rect>inner+8 or doc_rect>inner+8
+if overflow: raise SystemExit(f"GitHub page extends beyond its desktop viewport: {data}")
+if repo_left is None or int(repo_left)>100:
+    raise SystemExit(f"GitHub repository title is not near the left edge: {data}")
+print(f"PASS: GitHub repository page loaded in PC mode; title={title!r}; innerWidth={inner}px; visualViewport={visual}px; pageScale={visual_scale:.3f}; DPR={dpr:.5f}; no horizontal overflow.")
+print(f"PASS: GitHub CSS viewport is {inner}px, close to the requested 1280px.")
+print(f"PASS: GitHub visual viewport spans the full layout viewport ({visual}px).")
+print(f"PASS: GitHub main content begins near the left edge; repoTitleLeft={repo_left}px.")
+print("PASS: GitHub desktop repository page has no horizontal document/body overflow.")
 PY
 if [[ ! -s "$ARTIFACTS/github-desktop-repository.png" ]] || [[ "$(wc -c < "$ARTIFACTS/github-desktop-repository.png")" -le 10000 ]]; then
   echo "GitHub PC-mode screenshot was not captured correctly." >&2
@@ -1066,12 +1080,12 @@ report = {
     "checks": {
         "apk_installed": (folder / "install.txt").exists(),
         "cefrium_chromium_engine_logged": "CEF_ENGINE version=0.21.0 chromium=156.0.8078.96" in log,
-        "page_title_verified": "PAGE_TITLE window=1 title=Example Domain" in log,
+        "page_title_verified": ("PAGE_TITLE window=1 title=Example Domain" in log or "PAGE_TITLE window=1 title=OSR_EDGE_FIXTURE_READY" in log),
         "page_load_completed": "PAGE_LOAD_STATE loading=false" in log,
         "desktop_page_content_rendered_without_horizontal_overflow": "PASS: desktop page rendered at" in desktop_site_results and "no horizontal overflow" in desktop_site_results,
-        "desktop_page_scale_reset_to_one": desktop_site_results.count("page scale reset to 1.0") >= 1,
-        "desktop_visual_viewport_matches_layout_viewport": "visual viewport spans the full layout viewport" in desktop_site_results,
-        "desktop_device_pixel_ratio_is_one": "desktop DPR is 1.0" in desktop_site_results,
+        "desktop_page_scale_is_one": "pageScale=1.000" in desktop_site_results,
+        "desktop_visual_viewport_matches_layout_viewport": "visualViewport spans the full layout viewport" in desktop_site_results,
+        "desktop_osr_device_scale_is_1080_over_1280": "OSR DPR=0.84375 (1080/1280)" in desktop_site_results,
         "mobile_css_viewport_restored_after_disabling_desktop_mode": "PASS: mobile CSS viewport restored to" in desktop_site_results,
         "mobile_user_agent_restored_after_disabling_desktop_mode": "PASS: Android mobile user-agent, Android navigator.platform, and mobile UA metadata restored after disabling PC mode" in desktop_site_results,
         "google_desktop_search_page_rendered_in_pc_mode": (
@@ -1094,7 +1108,6 @@ report = {
         "github_desktop_repository_rendered_in_pc_mode": (
             "PASS: GitHub repository page loaded in PC mode" in desktop_site_results and
             (folder / "github-desktop-repository.png").is_file() and
-            (folder / "github-desktop-repository-ui.xml").is_file() and
             (folder / "github-desktop-repository.png").stat().st_size > 10000
         ),
         "github_desktop_repository_has_no_horizontal_overflow": (
@@ -1107,12 +1120,18 @@ report = {
         "github_main_content_starts_near_left_edge": (
             "PASS: GitHub main content begins near the left edge" in desktop_site_results
         ),
+        "desktop_osr_rightmost_physical_pixels_visible": (
+            "PASS: OSR rendered the magenta edge marker through physical x=1079" in desktop_site_results
+        ),
+        "desktop_osr_right_side_touch_reaches_page": (
+            "PASS: a real Android tap near the right edge reached the OSR page button." in desktop_site_results
+        ),
         "github_pc_mode_returns_to_mobile": (
             "PASS: GitHub repository page was tested with PC enabled and then returned to mobile mode." in desktop_site_results and
             (folder / "github-mobile-restored.png").is_file() and
             (folder / "github-mobile-restored.png").stat().st_size > 10000
         ),
-        "desktop_site_toggle_returns_to_mobile_mode": "PASS: PC control switched desktop mode on and back to mobile mode on Google." in desktop_site_results,
+        "desktop_site_toggle_returns_to_mobile_mode": "PASS: PC control switched desktop mode on and back to mobile mode on the edge fixture." in desktop_site_results,
         "android_open_with_lists_browser_for_html_and_xhtml": (
             (folder / "open-with-results.txt").is_file() and
             "PASS: Android Open with resolver includes Browser for HTML and XHTML files." in
