@@ -127,6 +127,7 @@ class MainActivity : AppCompatActivity() {
     private var notificationPermissionRequested = false
     private var downloadKeepAliveStarted = false
     private var activityDestroying = false
+    private var activityResumed = false
     private var browserCloseDeferredForDownload = false
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -469,6 +470,14 @@ class MainActivity : AppCompatActivity() {
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
         )
+
+        // A renderer can be created while the Activity is already foregrounded
+        // (e.g. switching Surface <-> OSR). It will not receive the Activity's
+        // earlier onResume callback, so resume it after its rendering view is attached.
+        if (activityResumed) {
+            instance.onResume()
+            Log.i(TAG, "BROWSER_RESUMED_ON_ATTACH window=$windowId desktop=${window.desktopMode}")
+        }
 
         instance.setNavigationClient(object : CefriumNavigationClient {
             override fun onUrlChanged(browser: CefriumBrowser, url: String) {
@@ -2962,6 +2971,7 @@ class MainActivity : AppCompatActivity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     override fun onPause() {
+        activityResumed = false
         // Keep only browser instances that own an active transfer running.
         exitPageFullscreen()
         browserWindows.forEach { window ->
@@ -2975,6 +2985,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        activityResumed = true
         browserWindows.forEach { window ->
             if (window.id == activeWindowId) {
                 window.browser.setMediaSessionEnabled(true)
