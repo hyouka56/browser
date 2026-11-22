@@ -423,7 +423,12 @@ class MainActivity : AppCompatActivity() {
             Log.i(TAG, "AD_BLOCK_RUNTIME_PROBE_INSTALLED")
         }
 
-        if (BuildConfig.DEBUG && intent.getBooleanExtra(EXTRA_TEST_DESKTOP_VIEWPORT, false)) {
+        if (BuildConfig.DEBUG &&
+            intent.getBooleanExtra(EXTRA_TEST_DESKTOP_VIEWPORT, false) &&
+            // Install on the first synthetic page and on the desktop replacement only.
+            // Never inject the fixture into the mobile renderer restored after PC mode.
+            (initialDesktopMode || existingWindow == null)
+        ) {
             instance.addDocumentStartJavaScript(
                 """
                 (() => {
