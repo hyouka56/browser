@@ -51,6 +51,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.cefrium.CefriumBrowser
+import com.cefrium.CefriumProfile
 import com.cefrium.CefriumChromeClient
 import com.cefrium.CefriumDownloadClient
 import com.cefrium.CefriumNavigationClient
@@ -95,6 +96,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var windowsButton: TextView
 
     private val browserWindows = mutableListOf<BrowserWindow>()
+    private val osrBrowserViews = mutableMapOf<CefriumBrowser, OsrBrowserView>()
     private val downloadBrowserOwners = LinkedHashMap<Int, CefriumBrowser>()
     private val privateDownloadIds = mutableSetOf<Int>()
     private var activeWindowId = -1
@@ -225,7 +227,10 @@ class MainActivity : AppCompatActivity() {
         existingBrowser: CefriumBrowser? = null,
         loadInitialUrl: Boolean = true,
         previousBrowserAlreadyClosed: Boolean = false,
-        desktopMode: Boolean? = null
+        desktopMode: Boolean? = null,
+        restoreNavigationState: ByteArray? = null,
+        restoreCurrentPageWhenStateMissing: Boolean = false,
+        browserProfile: CefriumProfile? = null
     ) {
         val previousWindow = browserWindows.firstOrNull { it.id == activeWindowId }
         if (!previousBrowserAlreadyClosed && previousWindow != null && previousWindow.browser !== existingBrowser) {
@@ -238,15 +243,25 @@ class MainActivity : AppCompatActivity() {
             previousWindow.browser.setMediaSessionEnabled(false)
             previousWindow.browser.onPause()
         }
-        val instance = existingBrowser ?: CefriumBrowser.createWithSurface(this, incognito)
-        val displayUrl = existingBrowser?.getUrl()?.takeIf(::isSupportedWebUrl) ?: initialUrl
-        // Native pull-to-refresh triggers only after a downward overscroll at the page top.
-        instance.setPullToRefreshEnabled(!BuildConfig.TV_LITE)
-        Log.i(TAG, "PULL_TO_REFRESH_CONFIG native=${!BuildConfig.TV_LITE}")
         val windowId = replaceWindowId ?: nextWindowId++
         val existingWindow = browserWindows.firstOrNull { it.id == windowId }
         // Desktop-site mode is opt-in per tab. Never inherit a stale global preference.
         val initialDesktopMode = desktopMode ?: existingWindow?.desktopMode ?: false
+        val profile = browserProfile
+            ?: existingWindow?.let { runCatching { it.browser.getProfile() }.getOrNull() }
+            ?: if (incognito) CefriumProfile.incognito() else CefriumProfile.getDefault()
+        val instance = existingBrowser ?: if (initialDesktopMode) {
+            createDesktopOsrBrowser(windowId, profile)
+        } else {
+            CefriumBrowser.createWithSurface(this, profile)
+        }
+        if (initialDesktopMode && !osrBrowserViews.containsKey(instance)) {
+            attachOsrRenderHandler(windowId, instance)
+        }
+        val displayUrl = existingBrowser?.getUrl()?.takeIf(::isSupportedWebUrl) ?: initialUrl
+        // Native pull-to-refresh triggers only after a downward overscroll at the page top.
+        instance.setPullToRefreshEnabled(!BuildConfig.TV_LITE)
+        Log.i(TAG, "PULL_TO_REFRESH_CONFIG native=${!BuildConfig.TV_LITE}")
         val window = existingWindow?.also {
             it.browser = instance
             it.title = "New tab"
@@ -408,10 +423,42 @@ class MainActivity : AppCompatActivity() {
             Log.i(TAG, "AD_BLOCK_RUNTIME_PROBE_INSTALLED")
         }
 
+        if (BuildConfig.DEBUG && intent.getBooleanExtra(EXTRA_TEST_DESKTOP_VIEWPORT, false)) {
+            instance.addDocumentStartJavaScript(
+                """
+                (() => {
+                    const install = () => {
+                        if (!document.body) return;
+                        document.documentElement.style.cssText = "margin:0!important;padding:0!important;width:100%!important;height:100%!important;overflow:hidden!important;background:#071627!important";
+                        document.body.replaceChildren();
+                        document.body.style.cssText = "margin:0!important;padding:0!important;width:100%!important;height:100%!important;overflow:hidden!important;background:#071627!important;color:#ffffff!important;font:24px sans-serif!important";
+                        const label = document.createElement("div");
+                        label.textContent = "PC viewport edge fixture ready";
+                        label.style.cssText = "position:fixed;left:24px;top:24px;z-index:2147483646";
+                        const tap = document.createElement("button");
+                        tap.id = "osr-right-edge-tap";
+                        tap.textContent = "Tap near right edge";
+                        tap.style.cssText = "position:fixed;right:32px;top:50%;transform:translateY(-50%);width:180px;height:72px;background:#00d7a5;color:#001b16;border:0;border-radius:8px;font-size:18px;z-index:2147483646";
+                        tap.addEventListener("click", () => { document.title = "OSR_EDGE_TAP_OK"; label.textContent = "Right-edge tap received"; });
+                        const edge = document.createElement("div");
+                        edge.id = "osr-right-edge-marker";
+                        edge.style.cssText = "position:fixed;right:0;top:0;width:24px;height:100vh;background:#ff00ff;z-index:2147483647;pointer-events:none";
+                        document.body.append(label, tap, edge);
+                        document.title = "OSR_EDGE_FIXTURE_READY";
+                    };
+                    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", install, { once: true });
+                    else install();
+                })();
+                """.trimIndent(),
+                setOf("*")
+            )
+            Log.i(TAG, "DESKTOP_EDGE_PIXEL_FIXTURE_INSTALLED")
+        }
+
         if (!BuildConfig.TV_LITE) instance.setAdBlockEnabled(adBlockingEnabled)
         Log.i(TAG, "AD_BLOCK_CONFIG enabled=$adBlockingEnabled tvLite=${BuildConfig.TV_LITE}")
         browserSlot.addView(
-            instance.getSurfaceContainer(),
+            browserContentView(instance),
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
@@ -471,8 +518,10 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
                     }
-                    if (isActiveWindow && window.desktopMode && isSupportedWebUrl(pageUrl)) {
-                        applyDesktopPageZoom(instance)
+                    if (isActiveWindow && window.desktopMode && isSupportedWebUrl(pageUrl) &&
+                        !osrBrowserViews.containsKey(instance)
+                    ) {
+                        Log.e(TAG, "DESKTOP_OSR_VIEW_MISSING window=$windowId; desktop viewport was not emulated")
                     }
                     val isLocalHtmlNavigation = window.localHtmlDisplayName != null &&
                         (pageUrl == "about:blank" || pageUrl.startsWith("data:"))
@@ -514,6 +563,10 @@ class MainActivity : AppCompatActivity() {
                                                 visualViewportOffsetTop: Number((window.visualViewport?.offsetTop || 0).toFixed(2)),
                                                 documentElementRectWidth: Math.round(document.documentElement?.getBoundingClientRect().width || 0),
                                                 bodyRectWidth: Math.round(document.body?.getBoundingClientRect().width || 0),
+                                                repoTitleLeft: (() => {
+                                                    const node = document.getElementById("repo-title-component");
+                                                    return node ? Math.round(node.getBoundingClientRect().left) : null;
+                                                })(),
                                                 href: location.href,
                                                 screenHeight: screen.height
                                             })"""
@@ -788,11 +841,22 @@ class MainActivity : AppCompatActivity() {
         })
         Log.i(TAG, "DOWNLOAD_HANDLER_REGISTERED")
 
-        if (loadInitialUrl && existingBrowser == null) {
-            if (!incognito && savedState != null && initialUrl == lastSuccessfulUrl) {
-                instance.restoreState(savedState)
-            } else {
+        when {
+            restoreNavigationState != null -> {
+                // Restore the complete history/PageState on a fresh renderer before its first load.
+                instance.restoreNavigationState(restoreNavigationState)
+                Log.i(TAG, "BROWSER_NAVIGATION_STATE_RESTORED window=$windowId bytes=${restoreNavigationState.size}")
+            }
+            restoreCurrentPageWhenStateMissing -> {
                 instance.loadUrl(initialUrl)
+                Log.i(TAG, "BROWSER_NAVIGATION_STATE_EMPTY_RELOADED window=$windowId")
+            }
+            loadInitialUrl && existingBrowser == null -> {
+                if (!incognito && savedState != null && initialUrl == lastSuccessfulUrl) {
+                    instance.restoreState(savedState)
+                } else {
+                    instance.loadUrl(initialUrl)
+                }
             }
         }
         Log.i(
@@ -800,6 +864,52 @@ class MainActivity : AppCompatActivity() {
             "CEF_BROWSER_CREATED url=${if (incognito) "<private>" else initialUrl} incognito=$incognito activeRenderers=" +
                 CefriumBrowser.activeRenderProcessCount()
         )
+    }
+
+    private fun attachOsrRenderHandler(windowId: Int, instance: CefriumBrowser): OsrBrowserView {
+        osrBrowserViews[instance]?.let { return it }
+        val widthPx = browserSlot.width.takeIf { it > 0 } ?: resources.displayMetrics.widthPixels
+        val heightPx = browserSlot.height.takeIf { it > 0 } ?: resources.displayMetrics.heightPixels
+        require(widthPx > 0 && heightPx > 0) {
+            "Desktop renderer needs a measured browser viewport; got ${widthPx}x${heightPx}"
+        }
+        val scale = widthPx.toFloat() / DESKTOP_VIEWPORT_WIDTH.toFloat()
+        val view = OsrBrowserView(this, instance, scale)
+        instance.setRenderHandler(view)
+        instance.setDialogActivity(this)
+        osrBrowserViews[instance] = view
+        Log.i(
+            TAG,
+            "DESKTOP_OSR_VIEWPORT_READY window=$windowId physicalWidth=$widthPx physicalHeight=$heightPx " +
+                "cssWidth=${widthPx / scale} scale=${String.format(Locale.ROOT, "%.5f", scale)} rendering=offscreen"
+        )
+        return view
+    }
+
+    private fun createDesktopOsrBrowser(windowId: Int, profile: CefriumProfile): CefriumBrowser {
+        val widthPx = browserSlot.width.takeIf { it > 0 } ?: resources.displayMetrics.widthPixels
+        val heightPx = browserSlot.height.takeIf { it > 0 } ?: resources.displayMetrics.heightPixels
+        require(widthPx > 0 && heightPx > 0) {
+            "Desktop renderer needs a measured browser viewport; got ${widthPx}x${heightPx}"
+        }
+        return CefriumBrowser(
+            widthPx,
+            heightPx,
+            widthPx.toFloat() / DESKTOP_VIEWPORT_WIDTH.toFloat(),
+            profile
+        ).also { attachOsrRenderHandler(windowId, it) }
+    }
+
+    private fun browserContentView(target: CefriumBrowser): View =
+        osrBrowserViews[target] ?: target.getSurfaceContainer()
+
+    private fun releaseBrowserContentView(target: CefriumBrowser) {
+        osrBrowserViews.remove(target)?.let { view ->
+            // Detach the callback before releasing its bitmaps, including while a
+            // download-owned browser continues running after the Activity is destroyed.
+            runCatching { target.setRenderHandler(null) }
+            view.release()
+        }
     }
 
     private fun mediaSessionPendingIntent(windowId: Int): PendingIntent {
@@ -845,6 +955,7 @@ class MainActivity : AppCompatActivity() {
         if (activityDestroying && browserCloseDeferredForDownload) {
             DownloadKeepAliveService.releaseBrowser(this)
             val retained = browserToCloseAfterDownload
+            if (retained != null) releaseBrowserContentView(retained)
             runCatching { retained?.close() }
                 .onFailure { Log.e(TAG, "BROWSER_CLOSE_AFTER_DOWNLOAD_FAILED", it) }
             browserToCloseAfterDownload = null
@@ -883,6 +994,8 @@ class MainActivity : AppCompatActivity() {
             .takeIf { it.startsWith("https://") || it.startsWith("http://") }
             ?: "about:blank"
 
+        val failedProfile = runCatching { failedBrowser.getProfile() }.getOrNull()
+        releaseBrowserContentView(failedBrowser)
         runCatching { failedBrowser.close() }
             .onFailure { Log.w(TAG, "Closing the terminated Chromium browser reported an error", it) }
         browserSlot.removeAllViews()
@@ -893,7 +1006,9 @@ class MainActivity : AppCompatActivity() {
             restoreUrl,
             incognito = currentWindow?.incognito == true,
             replaceWindowId = currentWindow?.id,
-            previousBrowserAlreadyClosed = true
+            previousBrowserAlreadyClosed = true,
+            desktopMode = currentWindow?.desktopMode,
+            browserProfile = failedProfile
         )
     }
 
@@ -1226,22 +1341,73 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Desktop mode is available for websites only", Toast.LENGTH_SHORT).show()
             return
         }
+        val oldBrowser = activeWindow.browser
+        if (hasActiveDownloadForBrowser(oldBrowser)) {
+            Toast.makeText(this, "Finish this tab's active download before switching rendering mode", Toast.LENGTH_LONG).show()
+            return
+        }
 
         val enabled = !activeWindow.desktopMode
+        val profile = runCatching { oldBrowser.getProfile() }.getOrElse { error ->
+            Log.e(TAG, "DESKTOP_MODE_PROFILE_UNAVAILABLE window=${activeWindow.id}", error)
+            Toast.makeText(this, "Unable to preserve this tab's site data", Toast.LENGTH_LONG).show()
+            return
+        }
+        val navigationState = runCatching { oldBrowser.serializeNavigationState() }
+            .onFailure { Log.w(TAG, "DESKTOP_MODE_HISTORY_SERIALIZE_FAILED window=${activeWindow.id}", it) }
+            .getOrNull()
+
+        val replacement = try {
+            if (enabled) {
+                createDesktopOsrBrowser(activeWindow.id, profile)
+            } else {
+                CefriumBrowser.createWithSurface(this, profile)
+            }
+        } catch (error: Throwable) {
+            Log.e(TAG, "DESKTOP_MODE_RENDERER_CREATE_FAILED window=${activeWindow.id} enabled=$enabled", error)
+            Toast.makeText(this, "Unable to switch browser rendering mode", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        oldBrowser.setFocus(false)
+        oldBrowser.setMediaSessionEnabled(false)
+        oldBrowser.setPageVisible(false)
+        oldBrowser.onPause()
+        browserSlot.removeAllViews()
+        releaseBrowserContentView(oldBrowser)
+        runCatching { oldBrowser.close() }
+            .onFailure { Log.e(TAG, "DESKTOP_MODE_OLD_RENDERER_CLOSE_FAILED window=${activeWindow.id}", it) }
+
         activeWindow.desktopMode = enabled
-        // Keep the PC toggle scoped to this tab; new tabs always start in mobile mode.
-        applyDesktopSiteSettings(activeWindow.browser, enabled)
         activeWindow.url = currentUrl
         lastRequestedUrl = currentUrl
         searchField.setText(currentUrl)
         updateDesktopSiteButton()
-        activeWindow.browser.loadUrl(currentUrl)
+        attachBrowser(
+            currentUrl,
+            incognito = activeWindow.incognito,
+            replaceWindowId = activeWindow.id,
+            existingBrowser = replacement,
+            loadInitialUrl = false,
+            previousBrowserAlreadyClosed = true,
+            desktopMode = enabled,
+            restoreNavigationState = navigationState,
+            restoreCurrentPageWhenStateMissing = navigationState == null,
+            browserProfile = profile
+        )
+        // Keep the fixture injected while swapping Surface <-> OSR, then clear it
+        // as soon as the test returns to mobile mode so later sites stay untouched.
+        if (!enabled) intent.removeExtra(EXTRA_TEST_DESKTOP_VIEWPORT)
         Toast.makeText(
             this,
             if (enabled) "Desktop site enabled" else "Mobile site enabled",
             Toast.LENGTH_SHORT
         ).show()
-        Log.i(TAG, "DESKTOP_SITE_MODE window=${activeWindow.id} enabled=$enabled url=$currentUrl")
+        Log.i(
+            TAG,
+            "DESKTOP_SITE_MODE window=${activeWindow.id} enabled=$enabled renderer=${if (enabled) "OSR" else "Surface"} " +
+                "historyRestored=${navigationState != null} url=$currentUrl"
+        )
     }
 
     private fun applyDesktopSiteSettings(target: CefriumBrowser, enabled: Boolean) {
@@ -1335,104 +1501,6 @@ class MainActivity : AppCompatActivity() {
             target.setZoomLevel(0.0)
             Log.i(TAG, "MOBILE_VIEWPORT_ZOOM_RESET window=${activeWindow?.id ?: -1}")
         }
-    }
-
-    private fun applyDesktopPageZoom(target: CefriumBrowser) {
-        fun applyWhenSurfaceIsReady(attempt: Int) {
-            val activeWindow = browserWindows.firstOrNull {
-                it.id == activeWindowId && it.browser === target && it.desktopMode
-            } ?: return
-            val surfaceWidthPx = browserSlot.width
-            val surfaceHeightPx = browserSlot.height
-            if (surfaceWidthPx <= 0 || surfaceHeightPx <= 0) {
-                if (attempt < 8) {
-                    browserSlot.postDelayed({ applyWhenSurfaceIsReady(attempt + 1) }, 100L)
-                } else {
-                    Log.w(
-                        TAG,
-                        "DESKTOP_VIEWPORT_ZOOM_SKIPPED window=${activeWindow.id} widthPx=$surfaceWidthPx heightPx=$surfaceHeightPx"
-                    )
-                }
-                return
-            }
-
-            // Keep a real desktop CSS viewport and a normal desktop DPR. The
-            // separate CDP `scale` transform fits the rendered desktop canvas into
-            // the Android surface and applies the inverse mapping to touch events.
-            // Using a sub-1 deviceScaleFactor here changes DPR/font metrics instead
-            // of expressing the output fit, and can leave mobile/desktop scales mixed.
-            val targetCssWidth = DESKTOP_VIEWPORT_WIDTH
-            val targetCssHeight = Math.round(
-                targetCssWidth.toDouble() * surfaceHeightPx.toDouble() / surfaceWidthPx.toDouble()
-            ).toInt().coerceAtLeast(1)
-            val outputScale = (surfaceWidthPx.toDouble() / targetCssWidth.toDouble())
-                .coerceIn(0.1, 10.0)
-            val deviceMetrics = JSONObject()
-                .put("width", targetCssWidth)
-                .put("height", targetCssHeight)
-                .put("screenWidth", targetCssWidth)
-                .put("screenHeight", targetCssHeight)
-                .put("deviceScaleFactor", 1.0)
-                .put("scale", outputScale)
-                .put("mobile", false)
-
-            // Clear any native page zoom left by a previous tab/site before applying
-            // the desktop viewport. setZoomLevel(0) alone does not reset page scale.
-            target.setZoomLevel(0.0)
-            target.executeDevToolsMethod(
-                "Emulation.setDeviceMetricsOverride",
-                deviceMetrics.toString()
-            ) metricsCallback@ { success, resultJson ->
-                val currentWindow = browserWindows.firstOrNull {
-                    it.id == activeWindowId && it.browser === target && it.desktopMode
-                } ?: return@metricsCallback
-                if (success) {
-                    target.executeDevToolsMethod(
-                        "Emulation.resetPageScaleFactor",
-                        "{}"
-                    ) resetCallback@ { resetSuccess, resetResult ->
-                        val stillActive = browserWindows.firstOrNull {
-                            it.id == activeWindowId && it.browser === target && it.desktopMode
-                        } ?: return@resetCallback
-                        target.setZoomLevel(0.0)
-                        val scaleText = String.format(Locale.ROOT, "%.4f", outputScale)
-                        Log.i(
-                            TAG,
-                            "DESKTOP_PAGE_SCALE_RESET window=${stillActive.id} success=$resetSuccess result=${resetResult.orEmpty()}"
-                        )
-                        Log.i(
-                            TAG,
-                            "DESKTOP_DEVICE_METRICS_APPLIED window=${stillActive.id} cssWidth=$targetCssWidth cssHeight=$targetCssHeight deviceScaleFactor=1.0000 outputScale=$scaleText mobile=false"
-                        )
-                        Log.i(
-                            TAG,
-                            "DESKTOP_VIEWPORT_ZOOM_APPLIED window=${stillActive.id} surfaceWidthPx=$surfaceWidthPx surfaceHeightPx=$surfaceHeightPx cssViewportWidth=$targetCssWidth cssViewportHeight=$targetCssHeight deviceScaleFactor=1.0000 outputScale=$scaleText zoomLevel=0.0000 pageScaleReset=$resetSuccess targetCssWidth=$targetCssWidth appliedAfterLoad=true"
-                        )
-                    }
-                } else {
-                    // Do not pretend the desktop viewport was applied if Chromium
-                    // rejected it. Retain a legible native zoom fallback and log it.
-                    val density = resources.displayMetrics.density.toDouble().coerceAtLeast(0.1)
-                    val viewportWidthDp = surfaceWidthPx.toDouble() / density
-                    val fallbackFactor = (viewportWidthDp / targetCssWidth.toDouble()).coerceIn(0.1, 1.0)
-                    val fallbackLevel = (kotlin.math.ln(fallbackFactor) / kotlin.math.ln(1.2))
-                        .coerceIn(-10.0, 0.0)
-                    target.setZoomLevel(fallbackLevel)
-                    Log.e(
-                        TAG,
-                        "DESKTOP_DEVICE_METRICS_FAILED window=${currentWindow.id} result=$resultJson; using legacy page zoom"
-                    )
-                    Log.i(
-                        TAG,
-                        "DESKTOP_VIEWPORT_ZOOM_APPLIED window=${currentWindow.id} surfaceWidthPx=$surfaceWidthPx surfaceHeightPx=$surfaceHeightPx density=$density viewportWidthDp=$viewportWidthDp zoomFactor=$fallbackFactor zoomLevel=$fallbackLevel targetCssWidth=$targetCssWidth appliedAfterLoad=true fallback=true"
-                    )
-                }
-            }
-        }
-
-        // The navigation callback normally runs after layout. Keep bounded retries for
-        // restored tabs whose Surface has not been measured yet.
-        browserSlot.post { applyWhenSurfaceIsReady(0) }
     }
 
     private fun handleWebPermissionRequest(request: CefriumPermissionRequest) {
@@ -1612,7 +1680,7 @@ class MainActivity : AppCompatActivity() {
         target.browser.setFocus(true)
         target.browser.setPageVisible(true)
         target.browser.onResume()
-        browserSlot.addView(target.browser.getSurfaceContainer(), FrameLayout.LayoutParams(
+        browserSlot.addView(browserContentView(target.browser), FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT
         ))
@@ -1646,6 +1714,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         browserWindows.removeAll { it.id == target.id }
+        releaseBrowserContentView(target.browser)
         if (closeBrowser) {
             runCatching { target.browser.close() }
                 .onFailure { Log.w(TAG, "Unable to close browser window id=${target.id}", it) }
@@ -1693,13 +1762,21 @@ class MainActivity : AppCompatActivity() {
         val currentWindow = browserWindows.firstOrNull { it.id == activeWindowId }
         val restoreUrl = currentWindow?.url?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
             ?: lastSuccessfulUrl
+        val oldProfile = runCatching { oldBrowser.getProfile() }.getOrNull()
+        val oldNavigationState = runCatching { oldBrowser.serializeNavigationState() }.getOrNull()
+        releaseBrowserContentView(oldBrowser)
         runCatching { oldBrowser.close() }
             .onFailure { Log.w(TAG, "Closing browser before manual retry reported an error", it) }
         browserSlot.removeAllViews()
         attachBrowser(
             restoreUrl,
             incognito = currentWindow?.incognito == true,
-            replaceWindowId = currentWindow?.id
+            replaceWindowId = currentWindow?.id,
+            previousBrowserAlreadyClosed = true,
+            desktopMode = currentWindow?.desktopMode,
+            restoreNavigationState = oldNavigationState,
+            restoreCurrentPageWhenStateMissing = oldNavigationState == null,
+            browserProfile = oldProfile
         )
     }
 
@@ -2928,10 +3005,14 @@ class MainActivity : AppCompatActivity() {
                 activeDownloadItems.containsKey(id) || pendingPublicSaveIds.contains(id)
             }?.value ?: browser
             DownloadKeepAliveService.retainBrowser(this, retained)
+            releaseBrowserContentView(retained)
             browserToCloseAfterDownload = retained
             browserCloseDeferredForDownload = true
             browserWindows.forEach { window ->
-                if (window.browser !== retained) runCatching { window.browser.close() }
+                if (window.browser !== retained) {
+                    releaseBrowserContentView(window.browser)
+                    runCatching { window.browser.close() }
+                }
             }
             Log.i(TAG, "BROWSER_CLOSE_DEFERRED_FOR_DOWNLOAD pendingSave=${pendingPublicSaveIds.isNotEmpty()}")
         } else {
@@ -2939,6 +3020,7 @@ class MainActivity : AppCompatActivity() {
             DownloadKeepAliveService.releaseBrowser(this)
             downloadKeepAliveStarted = false
             browserWindows.forEach { window ->
+                releaseBrowserContentView(window.browser)
                 runCatching { window.browser.close() }
             }
         }
@@ -2984,6 +3066,7 @@ class MainActivity : AppCompatActivity() {
         const val EXTRA_TEST_ADBLOCK_PAGE = "com.search.browser.TEST_ADBLOCK_PAGE"
         const val EXTRA_TEST_ADBLOCK_MULTIWINDOW = "com.search.browser.TEST_ADBLOCK_MULTIWINDOW"
         const val EXTRA_TEST_OPEN_HTML_FILE = "com.search.browser.TEST_OPEN_HTML_FILE"
+        const val EXTRA_TEST_DESKTOP_VIEWPORT = "com.search.browser.TEST_DESKTOP_VIEWPORT"
         const val BACKGROUND_DOWNLOAD_TEST_FILE = "download-background-test.txt"
         const val BACKGROUND_DOWNLOAD_TEST_DELAY_MS = 8_000L
         const val TAG = "Browser"
