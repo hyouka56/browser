@@ -352,7 +352,7 @@ read -r OSR_TAP_X OSR_TAP_Y < "$ARTIFACTS/osr-edge-tap-centre.txt"
 adb shell input tap "$OSR_TAP_X" "$OSR_TAP_Y"
 wait_for_log "PAGE_TITLE window=1 title=OSR_EDGE_TAP_OK" 1 45
 printf 'PASS: a real Android tap near the right edge reached the OSR page button.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
-tap_accessibility_node_with_system_recovery desc "Desktop site enabled."
+tap_accessibility_node_with_system_recovery desc "Desktop site enabled. Tap to use mobile site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=false" 1 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 3 120
 wait_for_log "MOBILE_USER_AGENT_OVERRIDE_RESTORED window=1" 1 30
@@ -482,7 +482,7 @@ if [[ ! -s "$ARTIFACTS/google-mobile-search-restored.png" ]] || [[ "$(wc -c < "$
   exit 1
 fi
 printf 'PASS: Google search was tested in mobile and PC modes; desktop and restored-mobile screenshots captured.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
-printf 'PASS: PC control switched desktop mode on and back to mobile mode on Google.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
+printf 'PASS: PC control switched desktop mode on and back to mobile mode on the edge fixture.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
 
 # Focus the restored Google search field and capture the exact state in which its keyboard controls should be visible.
 tap_accessibility_node_with_system_recovery text "hi"
@@ -1082,7 +1082,7 @@ report = {
         "page_load_completed": "PAGE_LOAD_STATE loading=false" in log,
         "desktop_page_content_rendered_without_horizontal_overflow": "PASS: desktop page rendered at" in desktop_site_results and "no horizontal overflow" in desktop_site_results,
         "desktop_page_scale_is_one": "pageScale=1.000" in desktop_site_results,
-        "desktop_visual_viewport_matches_layout_viewport": "visual viewport spans the full layout viewport" in desktop_site_results,
+        "desktop_visual_viewport_matches_layout_viewport": "visualViewport spans the full layout viewport" in desktop_site_results,
         "desktop_osr_device_scale_is_1080_over_1280": "OSR DPR=0.84375 (1080/1280)" in desktop_site_results,
         "mobile_css_viewport_restored_after_disabling_desktop_mode": "PASS: mobile CSS viewport restored to" in desktop_site_results,
         "mobile_user_agent_restored_after_disabling_desktop_mode": "PASS: Android mobile user-agent, Android navigator.platform, and mobile UA metadata restored after disabling PC mode" in desktop_site_results,
