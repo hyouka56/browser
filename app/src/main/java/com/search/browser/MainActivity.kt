@@ -857,9 +857,14 @@ class MainActivity : AppCompatActivity() {
 
         when {
             restoreNavigationState != null -> {
-                // Restore the complete history/PageState on a fresh renderer before its first load.
+                // Restore the complete history/PageState on a fresh renderer, then reload
+                // the restored current entry to start its navigation on the new renderer.
+                // Cefrium restores the NavigationController stack but does not emit a new
+                // load/paint callback until the restored entry is explicitly reloaded.
                 instance.restoreNavigationState(restoreNavigationState)
                 Log.i(TAG, "BROWSER_NAVIGATION_STATE_RESTORED window=$windowId bytes=${restoreNavigationState.size}")
+                instance.reload()
+                Log.i(TAG, "BROWSER_NAVIGATION_STATE_RELOAD_REQUESTED window=$windowId")
             }
             restoreCurrentPageWhenStateMissing -> {
                 instance.loadUrl(initialUrl)

@@ -256,6 +256,7 @@ wait_for_log "MOBILE_USER_AGENT_BASELINE_CAPTURED window=1" 1 30
 tap_accessibility_node_with_system_recovery desc "Show desktop site"
 wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 1 30
 wait_for_log "BROWSER_RESUMED_ON_ATTACH window=1 desktop=true" 1 30
+wait_for_log "BROWSER_NAVIGATION_STATE_RELOAD_REQUESTED window=1" 1 30
 wait_for_log "DESKTOP_OSR_VIEWPORT_READY window=1" 1 45
 wait_for_log "DESKTOP_OSR_FIRST_FRAME width=1080" 1 45
 wait_for_log "PAGE_LOAD_STATE loading=false" 2 120
