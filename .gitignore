@@ -8,3 +8,6 @@ local.properties
 captures/
 .externalNativeBuild/
 .cxx/
+# Local Android release-signing material (created only during release builds)
+app/release-key.jks
+*.keystore

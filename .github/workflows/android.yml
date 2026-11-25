@@ -179,7 +179,7 @@ jobs:
             adb start-server
           disable-animations: true
           script: |
-            bash scripts/run-browser-emulator-test.sh "$RUNNER_TEMP/browser-apk/app-emulator-debug.apk" "${{ matrix.api-level }}"
+            bash scripts/android/run-browser-emulator-test.sh "$RUNNER_TEMP/browser-apk/app-emulator-debug.apk" "${{ matrix.api-level }}"
 
       - name: Upload emulator screenshots, Logcat, and report
         if: always()

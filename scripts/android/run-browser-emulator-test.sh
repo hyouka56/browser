@@ -4,7 +4,7 @@ set -Eeuo pipefail
 APK="${1:?Debug APK path is required}"
 EXPECTED_API="${2:?Expected Android API level is required}"
 PACKAGE="com.search.browser"
-ACTIVITY="$PACKAGE/.MainActivity"
+ACTIVITY="$PACKAGE/.ui.MainActivity"
 ARTIFACTS="artifacts/api-$EXPECTED_API"
 mkdir -p "$ARTIFACTS"
 

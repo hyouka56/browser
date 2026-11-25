@@ -1,4 +1,4 @@
-package com.search.browser
+package com.search.browser.downloads
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse

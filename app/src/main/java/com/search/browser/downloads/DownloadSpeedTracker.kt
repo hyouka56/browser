@@ -1,4 +1,4 @@
-package com.search.browser
+package com.search.browser.downloads
 
 /** Calculates a trailing average from observed byte-count changes and monotonic time. */
 internal class DownloadSpeedTracker(

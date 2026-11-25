@@ -1,5 +1,7 @@
-package com.search.browser
+package com.search.browser.downloads
 
+import com.search.browser.R
+import com.search.browser.ui.MainActivity
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent

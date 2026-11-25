@@ -36,3 +36,12 @@ These emulator jobs do not claim to reproduce an ARM32 TV's memory, GPU driver, 
 ## Build artifacts
 
 GitHub Actions uploads signed Debug APKs for ARM32 TV Lite, ARM64, and x86_64 emulator testing. The workflow does not publish a GitHub Release or sign a production Release APK.
+
+## Repository structure
+
+The Android source is grouped by responsibility: `browser/` contains URL, tab-label, and local HTML helpers; `downloads/` contains download state, file handling, APK archive support, speed tracking, and the keep-alive service; `ui/` contains the `MainActivity` screen and event coordinator. `BrowserApp.kt` remains at the app package root because it owns process-wide initialization.
+
+Unit tests mirror the production package groups under `app/src/test`. Android resources and the manifest remain in their standard locations, CI workflows remain under `.github/workflows`, and emulator automation lives under `scripts/android`.
+
+See [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md) for the package map, safe extension points, and verification commands.
+
