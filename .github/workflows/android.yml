@@ -175,7 +175,7 @@ jobs:
           emulator-options: >-
             -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
             -no-metrics -no-snapshot -camera-back none -camera-front none
-            ${{ matrix.api-level == 35 && '-dns-server 8.8.8.8,8.8.4.4' || '' }}
+            ${{ matrix.api-level == 35 && '-dns-server 8.8.8.8,8.8.4.4 -memory 4096' || '' }}
           pre-emulator-launch-script: |
             sudo apt-get install -y libx11-dev libx11-xcb-dev
             mkdir -p "$HOME/.android"

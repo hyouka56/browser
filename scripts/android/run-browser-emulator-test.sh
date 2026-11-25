@@ -22,6 +22,9 @@ collect_evidence() {
   adb shell dumpsys package "$PACKAGE" > "$ARTIFACTS/package-dump.txt" 2>&1 || true
   adb shell dumpsys activity activities > "$ARTIFACTS/activity-dump.txt" 2>&1 || true
   adb shell dumpsys meminfo "$PACKAGE" > "$ARTIFACTS/memory-dump.txt" 2>&1 || true
+  adb shell dumpsys meminfo > "$ARTIFACTS/system-memory-dump.txt" 2>&1 || true
+  adb shell dumpsys meminfo com.google.android.apps.nexuslauncher > "$ARTIFACTS/launcher-memory-dump.txt" 2>&1 || true
+  adb shell dumpsys cpuinfo > "$ARTIFACTS/cpuinfo.txt" 2>&1 || true
   adb shell dumpsys connectivity > "$ARTIFACTS/connectivity-dump.txt" 2>&1 || true
   adb shell dumpsys dnsresolver > "$ARTIFACTS/dnsresolver-dump.txt" 2>&1 || true
   adb shell ip route show > "$ARTIFACTS/ip-routes.txt" 2>&1 || true
@@ -171,18 +174,22 @@ PY
 }
 
 
-dismiss_external_anr_dialog_if_present() {
+tap_external_anr_wait_action() {
   local window_dump
   window_dump="$(adb shell dumpsys window 2>/dev/null || true)"
   if ! grep -F "Application Not Responding" <<< "$window_dump" >/dev/null; then
-    return 0
+    return 2
   fi
 
   local hierarchy="$ARTIFACTS/ui-hierarchy-anr-$RANDOM.xml"
-  adb shell uiautomator dump /sdcard/browser-anr.xml >/dev/null 2>&1 || {
+  if ! adb shell uiautomator dump /sdcard/browser-anr.xml >/dev/null 2>&1; then
+    window_dump="$(adb shell dumpsys window 2>/dev/null || true)"
+    if ! grep -F "Application Not Responding" <<< "$window_dump" >/dev/null; then
+      return 2
+    fi
     echo "Could not inspect the active system ANR dialog." >&2
     return 1
-  }
+  fi
   adb exec-out cat /sdcard/browser-anr.xml > "$hierarchy"
 
   local alert_title
@@ -198,6 +205,10 @@ for node in root.iter("node"):
 raise SystemExit("No system ANR alert title was found")
 PY
   )"; then
+    window_dump="$(adb shell dumpsys window 2>/dev/null || true)"
+    if ! grep -F "Application Not Responding" <<< "$window_dump" >/dev/null; then
+      return 2
+    fi
     echo "The ANR window is present, but its title could not be verified." >&2
     return 1
   fi
@@ -209,19 +220,13 @@ PY
 
   echo "External ANR dialog detected for '$alert_title'; choosing its accessible Wait action."
   if ! tap_accessibility_node text "Wait"; then
+    window_dump="$(adb shell dumpsys window 2>/dev/null || true)"
+    if ! grep -F "Application Not Responding" <<< "$window_dump" >/dev/null; then
+      return 2
+    fi
     echo "The external ANR dialog did not expose a clickable Wait action." >&2
     return 1
   fi
-
-  # The launcher can immediately recreate its ANR window after Wait. Do not
-  # declare recovery complete on a single transient frame with no dialog:
-  # require Browser to regain focus for four consecutive samples.
-  if ! wait_for_browser_window_focus 20 4; then
-    echo "The external system ANR dialog was dismissed, but Browser did not regain stable window focus." >&2
-    adb shell dumpsys window >&2 || true
-    return 1
-  fi
-  echo "PASS: external system ANR dialog dismissed; Browser foreground remained stable."
   return 0
 }
 
@@ -236,10 +241,27 @@ wait_for_browser_window_focus() {
   local required_samples="${2:-2}"
   local elapsed=0
   local stable_samples=0
+  local anr_dismissals=0
   while (( elapsed < timeout_seconds )); do
     local window_dump
     window_dump="$(adb shell dumpsys window 2>/dev/null || true)"
-    if browser_window_has_focus "$window_dump"; then
+    if grep -F "Application Not Responding" <<< "$window_dump" >/dev/null; then
+      if (( anr_dismissals >= 3 )); then
+        echo "External system ANR dialog kept recurring after $anr_dismissals recovery attempts." >&2
+        adb shell dumpsys window >&2 || true
+        return 1
+      fi
+      local tap_status=0
+      tap_external_anr_wait_action || tap_status=$?
+      if (( tap_status == 1 )); then
+        echo "Could not safely recover the external system ANR dialog." >&2
+        return 1
+      fi
+      if (( tap_status == 0 )); then
+        anr_dismissals=$((anr_dismissals + 1))
+      fi
+      stable_samples=0
+    elif browser_window_has_focus "$window_dump"; then
       stable_samples=$((stable_samples + 1))
       if (( stable_samples >= required_samples )); then
         return 0
@@ -250,9 +272,36 @@ wait_for_browser_window_focus() {
     sleep 1
     elapsed=$((elapsed + 1))
   done
-  echo "Browser did not hold foreground window focus for $required_samples consecutive samples." >&2
+  echo "Browser did not hold foreground window focus for $required_samples consecutive samples (external ANR dialogs dismissed: $anr_dismissals)." >&2
   adb shell dumpsys window >&2 || true
   return 1
+}
+
+dismiss_external_anr_dialog_if_present() {
+  local window_dump
+  window_dump="$(adb shell dumpsys window 2>/dev/null || true)"
+  if ! grep -F "Application Not Responding" <<< "$window_dump" >/dev/null; then
+    return 0
+  fi
+
+  local tap_status=0
+  tap_external_anr_wait_action || tap_status=$?
+  if (( tap_status == 2 )); then
+    return 0
+  fi
+  if (( tap_status != 0 )); then
+    return 1
+  fi
+
+  # wait_for_browser_window_focus also clears a recurring external ANR overlay,
+  # but only after verifying its title and using the system's Wait action.
+  if ! wait_for_browser_window_focus 20 4; then
+    echo "The external system ANR dialog was dismissed, but Browser did not regain stable window focus." >&2
+    adb shell dumpsys window >&2 || true
+    return 1
+  fi
+  echo "PASS: external system ANR dialog dismissed; Browser foreground remained stable."
+  return 0
 }
 
 accessibility_desc_exists() {
