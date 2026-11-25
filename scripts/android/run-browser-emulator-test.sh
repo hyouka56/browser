@@ -281,6 +281,12 @@ wait_for_desktop_site_transition() {
   local elapsed=0
   local retries=0
 
+  if ! dismiss_external_anr_dialog_if_present; then
+    return 1
+  fi
+  if ! wait_for_browser_window_focus 15 2; then
+    return 1
+  fi
   tap_accessibility_node_with_system_recovery desc "$before_desc" || return 1
   while (( elapsed < timeout_seconds )); do
     local matching_count
@@ -337,9 +343,6 @@ tap_accessibility_node_with_system_recovery() {
   for attempt in $(seq 1 4); do
     # Clear a verified external ANR overlay before inspecting app controls.
     if ! dismiss_external_anr_dialog_if_present; then
-      return 1
-    fi
-    if ! wait_for_browser_window_focus 15 2; then
       return 1
     fi
     if tap_accessibility_node "$mode" "$selector"; then
