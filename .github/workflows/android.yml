@@ -170,7 +170,12 @@ jobs:
           arch: x86_64
           profile: pixel_5
           force-avd-creation: true
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-metrics -no-snapshot -camera-back none -camera-front none
+          # API 35's hosted emulator intermittently inherits unusable host DNS servers.
+          # Android documents -dns-server as the workaround for emulator UnknownHost errors.
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+            -no-metrics -no-snapshot -camera-back none -camera-front none
+            ${{ matrix.api-level == 35 && '-dns-server 8.8.8.8,8.8.4.4' || '' }}
           pre-emulator-launch-script: |
             sudo apt-get install -y libx11-dev libx11-xcb-dev
             mkdir -p "$HOME/.android"

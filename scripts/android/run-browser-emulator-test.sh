@@ -22,6 +22,9 @@ collect_evidence() {
   adb shell dumpsys package "$PACKAGE" > "$ARTIFACTS/package-dump.txt" 2>&1 || true
   adb shell dumpsys activity activities > "$ARTIFACTS/activity-dump.txt" 2>&1 || true
   adb shell dumpsys meminfo "$PACKAGE" > "$ARTIFACTS/memory-dump.txt" 2>&1 || true
+  adb shell dumpsys connectivity > "$ARTIFACTS/connectivity-dump.txt" 2>&1 || true
+  adb shell dumpsys dnsresolver > "$ARTIFACTS/dnsresolver-dump.txt" 2>&1 || true
+  adb shell ip route show > "$ARTIFACTS/ip-routes.txt" 2>&1 || true
 }
 trap collect_evidence EXIT
 
