@@ -349,6 +349,7 @@ wait_for_desktop_site_transition() {
   local timeout_seconds="${5:-30}"
   local elapsed=0
   local retries=0
+  local focus_recoveries=0
 
   if ! dismiss_external_anr_dialog_if_present; then
     return 1
@@ -364,6 +365,33 @@ wait_for_desktop_site_transition() {
       if accessibility_desc_exists "$after_desc"; then
         echo "PASS: desktop-site transition confirmed by app log and accessibility state: $after_desc"
         return 0
+      fi
+
+      # A system launcher ANR can steal the foreground window after Browser has
+      # already logged the successful mode change. Restore the existing Browser
+      # task once, then verify the toolbar state before continuing the DOM checks.
+      if (( focus_recoveries < 1 )); then
+        local transition_window_dump
+        transition_window_dump="$(adb shell dumpsys window 2>/dev/null || true)"
+        if grep -F "Application Not Responding" <<< "$transition_window_dump" >/dev/null; then
+          if ! dismiss_external_anr_dialog_if_present; then
+            return 1
+          fi
+          transition_window_dump="$(adb shell dumpsys window 2>/dev/null || true)"
+        fi
+        if ! browser_window_has_focus "$transition_window_dump"; then
+          echo "RECOVER: desktop mode was logged but the Android system window stole focus; bringing the existing Browser task forward."
+          adb shell am start --activity-single-top --activity-reorder-to-front -W -n "$ACTIVITY" >/dev/null 2>&1 || true
+          focus_recoveries=$((focus_recoveries + 1))
+          if ! wait_for_browser_window_focus 15 2; then
+            echo "Browser did not regain focus after the desktop-mode transition." >&2
+            return 1
+          fi
+          if accessibility_desc_exists "$after_desc"; then
+            echo "PASS: desktop-site transition confirmed after restoring Browser foreground: $after_desc"
+            return 0
+          fi
+        fi
       fi
     fi
 
@@ -1149,7 +1177,10 @@ fi
 wait_for_log "DOWNLOAD_KEEP_ALIVE_SERVICE_STOPPED" 1 30
 wait_for_log "BROWSER_CLOSED_AFTER_DOWNLOAD" 1 30
 
-PAGE_LOG="$(adb logcat -d -s Browser:V 2>/dev/null)"
+# The background-download phase intentionally clears Logcat. Combine its live
+# log with the preserved pre-clear phase so renderer-recovery and private-download
+# assertions remain verifiable at the end of the complete run.
+PAGE_LOG="$(cat "$ARTIFACTS/private-download-final-logcat.txt"; adb logcat -d -s Browser:V 2>/dev/null)"
 for required in \
   "CEF_ENGINE version=0.21.0 chromium=156.0.8078.96" \
   "PAGE_TITLE window=1 title=Example Domain" \
@@ -1171,7 +1202,10 @@ if (( DARK_APP_CHROME_COUNT < 2 )); then
 fi
 
 
-adb logcat -d -v threadtime > "$ARTIFACTS/logcat.txt" 2>&1
+{
+  cat "$ARTIFACTS/private-download-final-logcat.txt"
+  adb logcat -d -v threadtime
+} > "$ARTIFACTS/logcat.txt" 2>&1
 if grep -F "FATAL EXCEPTION" "$ARTIFACTS/logcat.txt" >/dev/null; then
   echo "A fatal application exception was found in Logcat." >&2
   exit 1
