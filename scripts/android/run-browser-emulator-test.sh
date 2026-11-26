@@ -321,6 +321,25 @@ raise SystemExit(1)
 PY
 }
 
+# Google can display an optional feedback dialog over search results. Detect its
+# exact prompt before dismissing it so unrelated dialogs are never tapped.
+accessibility_text_exists() {
+  local selector="$1"
+  local hierarchy="$ARTIFACTS/ui-hierarchy-state-$RANDOM.xml"
+  adb shell uiautomator dump /sdcard/browser-state.xml >/dev/null 2>&1 || return 1
+  adb exec-out cat /sdcard/browser-state.xml > "$hierarchy" || return 1
+  python3 - "$hierarchy" "$selector" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+root = ET.parse(sys.argv[1]).getroot()
+selector = sys.argv[2]
+for node in root.iter("node"):
+    if selector in node.attrib.get("text", ""):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
 # A tap is only considered successful when both the app's transition log and
 # the resulting accessible button state agree. If a system ANR steals the tap,
 # recover the overlay and retry only while the original state is still visible.
@@ -598,6 +617,24 @@ if [[ ! -s "$ARTIFACTS/google-mobile-search-restored.png" ]] || [[ "$(wc -c < "$
 fi
 printf 'PASS: Google search was tested in mobile and PC modes; desktop and restored-mobile screenshots captured.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
 printf 'PASS: PC control switched desktop mode on and back to mobile mode on Google.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
+
+# Google may show an optional feedback dialog after the results finish loading.
+# Only dismiss it when its identifying prompt is present, then verify it is gone.
+if accessibility_text_exists "Please help us improve Google."; then
+  echo "INFO: Google feedback dialog detected; dismissing its explicit No thanks action."
+  tap_accessibility_node_with_system_recovery text "No thanks"
+  for attempt in $(seq 1 10); do
+    if ! accessibility_text_exists "Please help us improve Google."; then
+      echo "PASS: Google feedback dialog dismissed; search controls are accessible again."
+      break
+    fi
+    sleep 1
+  done
+  if accessibility_text_exists "Please help us improve Google."; then
+    echo "Google feedback dialog remained visible after selecting No thanks." >&2
+    exit 1
+  fi
+fi
 
 # Focus the restored Google search field and capture the exact state in which its keyboard controls should be visible.
 tap_accessibility_node_with_system_recovery text "hi"
