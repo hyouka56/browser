@@ -1050,7 +1050,7 @@ adb shell am start -W -n "$ACTIVITY" \
   --ez com.search.browser.TEST_INCOGNITO_DOWNLOAD_PAGE true \
   --ez com.search.browser.TEST_CLOSE_PRIVATE_AFTER_DOWNLOAD true \
   2>&1 | tee "$ARTIFACTS/private-download-test-launch.txt"
-wait_for_log "CEF_BROWSER_CREATED url=https://example.com/ incognito=true" 1 60
+wait_for_log "CEF_BROWSER_CREATED url=<private> incognito=true" 1 60
 wait_for_log "DOWNLOAD_HANDLER_REGISTERED" 2 30
 adb shell input tap 540 600
 wait_for_log "DOWNLOAD_REQUEST_ACCEPTED name=Private download" 1 60
