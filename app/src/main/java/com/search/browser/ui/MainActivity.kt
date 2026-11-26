@@ -3073,6 +3073,8 @@ class MainActivity : AppCompatActivity() {
         const val KEY_NOTIFICATION_PERMISSION_ASKED = "download_notification_permission_asked"
         const val EXTRA_TEST_URL = "com.search.browser.TEST_URL"
         const val EXTRA_TEST_DOWNLOAD_PAGE = "com.search.browser.TEST_DOWNLOAD_PAGE"
+        const val EXTRA_TEST_INCOGNITO_DOWNLOAD_PAGE = "com.search.browser.TEST_INCOGNITO_DOWNLOAD_PAGE"
+        const val EXTRA_TEST_CLOSE_PRIVATE_AFTER_DOWNLOAD = "com.search.browser.TEST_CLOSE_PRIVATE_AFTER_DOWNLOAD"
         const val EXTRA_SHOW_DOWNLOADS = "com.search.browser.SHOW_DOWNLOADS"
         const val EXTRA_TEST_CRASH_RENDERER = "com.search.browser.TEST_CRASH_RENDERER"
         const val EXTRA_TEST_ADBLOCK_PAGE = "com.search.browser.TEST_ADBLOCK_PAGE"
