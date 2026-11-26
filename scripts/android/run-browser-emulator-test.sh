@@ -1089,14 +1089,18 @@ if grep -F "$PRIVATE_DOWNLOAD_ID-download-test.txt" <<< "$PRIVATE_STAGING_FILES"
 fi
 printf 'PASS: incognito download stayed in app-private storage, was not exported publicly, and was removed when the last private window closed.\n' | tee "$ARTIFACTS/private-download-results.txt"
 
+# Preserve the private-download evidence, then isolate the background-download
+# fixture's readiness checks from title/handler events emitted by earlier tabs.
+adb logcat -d -v threadtime > "$ARTIFACTS/private-download-final-logcat.txt" 2>&1 || true
+adb logcat -c
 # Relaunch the ordinary fixture before testing the keep-alive service.
 adb shell am force-stop "$PACKAGE"
 adb shell am start -W -n "$ACTIVITY" \
   --es com.search.browser.TEST_URL "https://example.com/" \
   --ez com.search.browser.TEST_DOWNLOAD_PAGE true \
   2>&1 | tee "$ARTIFACTS/launch-background-download-test.txt"
-wait_for_log "PAGE_TITLE window=1 title=Download Test" 3 60
-wait_for_log "DOWNLOAD_HANDLER_REGISTERED" 3 30
+wait_for_log "PAGE_TITLE window=1 title=Download Test" 1 60
+wait_for_log "DOWNLOAD_HANDLER_REGISTERED" 1 30
 
 # Start a delayed debug download, then remove the Activity task while the
 # transfer is pending. The foreground service must keep Cefrium alive until
