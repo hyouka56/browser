@@ -59,4 +59,4 @@ Run the device/emulator verification script with an x86_64 emulator APK and its 
 bash scripts/android/run-browser-emulator-test.sh <path-to-emulator-debug-apk> <api-level>
 ```
 
-The GitHub Actions workflow `Browser Android build and emulator tests` runs the same unit-test/build matrix and API 30/35/36 emulator checks on pushes and pull requests targeting `main`.
+The GitHub Actions workflow `Browser Android build and emulator tests` runs the same unit-test/build matrix and API 30/31/35/36 emulator checks on pushes and pull requests targeting `main`.

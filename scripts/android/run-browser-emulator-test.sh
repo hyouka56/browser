@@ -321,6 +321,23 @@ raise SystemExit(1)
 PY
 }
 
+accessibility_text_exists() {
+  local selector="$1"
+  local hierarchy="$ARTIFACTS/ui-hierarchy-state-$RANDOM.xml"
+  adb shell uiautomator dump /sdcard/browser-state.xml >/dev/null 2>&1 || return 1
+  adb exec-out cat /sdcard/browser-state.xml > "$hierarchy" || return 1
+  python3 - "$hierarchy" "$selector" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+root = ET.parse(sys.argv[1]).getroot()
+selector = sys.argv[2]
+for node in root.iter("node"):
+    if selector in node.attrib.get("text", ""):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
 # A tap is only considered successful when both the app's transition log and
 # the resulting accessible button state agree. If a system ANR steals the tap,
 # recover the overlay and retry only while the original state is still visible.
@@ -599,6 +616,24 @@ fi
 printf 'PASS: Google search was tested in mobile and PC modes; desktop and restored-mobile screenshots captured.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
 printf 'PASS: PC control switched desktop mode on and back to mobile mode on Google.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
 
+# Google may place an optional feedback survey over the search results. Only
+# dismiss it when its exact identifying prompt is present.
+if accessibility_text_exists "Please help us improve Google."; then
+  echo "INFO: Google feedback dialog detected; selecting its explicit No thanks action."
+  tap_accessibility_node_with_system_recovery text "No thanks"
+  for attempt in $(seq 1 10); do
+    if ! accessibility_text_exists "Please help us improve Google."; then
+      echo "PASS: Google feedback dialog dismissed; search controls are accessible again."
+      break
+    fi
+    sleep 1
+  done
+  if accessibility_text_exists "Please help us improve Google."; then
+    echo "Google feedback dialog remained visible after selecting No thanks." >&2
+    exit 1
+  fi
+fi
+
 # Focus the restored Google search field and capture the exact state in which its keyboard controls should be visible.
 tap_accessibility_node_with_system_recovery text "hi"
 sleep 2
@@ -666,7 +701,7 @@ doc_scroll = int(data.get("scrollWidth", 0))
 body_client = int(data.get("bodyClientWidth", 0))
 body_scroll = int(data.get("bodyScrollWidth", 0))
 body_rect = int(data.get("bodyRectWidth", 0))
-doc_rect = int(data.get("documentRectWidth", 0))
+doc_rect = int(data.get("documentElementRectWidth", 0))
 if not title.strip() or not body.strip() or "github" not in title.lower() and "browser" not in title.lower():
     print(f"FAIL: GitHub repository page did not render in PC mode: {data}")
 else:
@@ -1005,6 +1040,50 @@ if ! grep -F "pkg=$PACKAGE" "$ARTIFACTS/notification-download-test.apk.txt" >/de
   exit 1
 fi
 
+# Remove the earlier public fixture, then prove an incognito download stays in
+# app-private storage and is deleted when the last private window closes.
+adb shell rm -f /sdcard/Download/download-test.txt
+adb shell am force-stop "$PACKAGE"
+adb shell am start -W -n "$ACTIVITY" \
+  --es com.search.browser.TEST_URL "https://example.com/" \
+  --ez com.search.browser.TEST_DOWNLOAD_PAGE true \
+  --ez com.search.browser.TEST_INCOGNITO_DOWNLOAD_PAGE true \
+  --ez com.search.browser.TEST_CLOSE_PRIVATE_AFTER_DOWNLOAD true \
+  2>&1 | tee "$ARTIFACTS/private-download-test-launch.txt"
+wait_for_log "CEF_BROWSER_CREATED url=https://example.com/ incognito=true" 1 60
+wait_for_log "DOWNLOAD_HANDLER_REGISTERED" 2 30
+adb shell input tap 540 600
+wait_for_log "DOWNLOAD_REQUEST_ACCEPTED name=Private download" 1 60
+PRIVATE_DOWNLOAD_ID="$(adb logcat -d -s Browser:V 2>/dev/null | sed -nE 's/.*DOWNLOAD_REQUEST_ACCEPTED name=Private download id=([0-9]+).*/\1/p' | tail -n1)"
+if [[ ! "$PRIVATE_DOWNLOAD_ID" =~ ^[0-9]+$ ]]; then
+  echo "Could not identify the incognito download id." >&2
+  adb logcat -d -s Browser:V >&2 || true
+  exit 1
+fi
+wait_for_log "TEST_PRIVATE_DOWNLOAD_STAGED id=$PRIVATE_DOWNLOAD_ID exists=true" 1 90
+wait_for_log "TEST_PRIVATE_DOWNLOAD_CLOSE_REQUESTED id=$PRIVATE_DOWNLOAD_ID" 1 30
+wait_for_log "INCOGNITO_SESSION_CLOSED" 1 30
+if adb shell test -e /sdcard/Download/download-test.txt; then
+  echo "Incognito download leaked into the public Downloads directory." >&2
+  exit 1
+fi
+PRIVATE_STAGING_FILES="$(adb shell run-as "$PACKAGE" ls files/private-downloads 2>/dev/null | tr -d '\r' || true)"
+if grep -F "$PRIVATE_DOWNLOAD_ID-download-test.txt" <<< "$PRIVATE_STAGING_FILES" >/dev/null; then
+  echo "Incognito staging file remained after the last private window closed." >&2
+  printf '%s\n' "$PRIVATE_STAGING_FILES" >&2
+  exit 1
+fi
+printf 'PASS: incognito download stayed in app-private storage, was not exported publicly, and was removed when the last private window closed.\n' | tee "$ARTIFACTS/private-download-results.txt"
+
+# Relaunch the ordinary fixture before testing the keep-alive service.
+adb shell am force-stop "$PACKAGE"
+adb shell am start -W -n "$ACTIVITY" \
+  --es com.search.browser.TEST_URL "https://example.com/" \
+  --ez com.search.browser.TEST_DOWNLOAD_PAGE true \
+  2>&1 | tee "$ARTIFACTS/launch-background-download-test.txt"
+wait_for_log "PAGE_TITLE window=1 title=Download Test" 3 60
+wait_for_log "DOWNLOAD_HANDLER_REGISTERED" 3 30
+
 # Start a delayed debug download, then remove the Activity task while the
 # transfer is pending. The foreground service must keep Cefrium alive until
 # the file is copied into the public Downloads directory. The API35 emulator
@@ -1299,6 +1378,11 @@ report = {
         "before_recovery_screenshot_captured": before.is_file(),
         "after_recovery_screenshot_visibly_rendered": ratio_after >= 0.01,
         "text_file_download_saved": "DOWNLOAD_FILE_SAVED name=download-test.txt" in log,
+        "incognito_download_stayed_private_and_was_deleted": (
+            (folder / "private-download-results.txt").is_file() and
+            "PASS: incognito download stayed in app-private storage, was not exported publicly, and was removed when the last private window closed." in
+                (folder / "private-download-results.txt").read_text()
+        ),
         "apk_file_download_saved": "DOWNLOAD_FILE_SAVED name=download-test.apk" in log,
         "concurrent_download_saved_while_another_was_pending": (
             "DOWNLOAD_FILE_SAVED name=download-concurrent-test.txt" in log and

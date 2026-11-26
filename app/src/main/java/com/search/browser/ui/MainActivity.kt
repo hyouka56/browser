@@ -10,6 +10,7 @@ import com.search.browser.downloads.DownloadFileSupport
 import com.search.browser.downloads.DownloadKeepAliveService
 import com.search.browser.downloads.DownloadRecord
 import com.search.browser.downloads.DownloadSpeedTracker
+import com.search.browser.downloads.DownloadStoragePolicy
 import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -141,7 +142,7 @@ class MainActivity : AppCompatActivity() {
     ) { granted ->
         notificationPermissionRequested = false
         if (granted) {
-            downloadRecords.values.filterNot { privateDownloadIds.contains(it.id) }
+            downloadRecords.values.filterNot { privateDownloadIds.contains(it.id) || it.privateMode }
                 .maxByOrNull { it.updatedAt }
                 ?.takeIf { it.path.startsWith("content://") || it.canceled || it.interrupted }
                 ?.let(::publishDownloadNotification)
@@ -181,6 +182,7 @@ class MainActivity : AppCompatActivity() {
         lastSuccessfulUrl = preferences.getString(KEY_LAST_URL, HOME_URL).orEmpty()
             .takeIf { it.startsWith("https://") || it.startsWith("http://") } ?: HOME_URL
         lastRequestedUrl = lastSuccessfulUrl
+        cleanupAbandonedPrivateDownloads()
         restoreSavedDownloads()
         createDownloadNotificationChannel()
         buildLayout()
@@ -213,7 +215,11 @@ class MainActivity : AppCompatActivity() {
         if (incomingHtmlUri != null && incomingHtmlFile == null) {
             Toast.makeText(this, "Unable to open this HTML file", Toast.LENGTH_LONG).show()
         }
-        attachBrowser(startUrl, savedInstanceState?.getBundle(KEY_BROWSER_STATE))
+        attachBrowser(
+            startUrl,
+            savedInstanceState?.getBundle(KEY_BROWSER_STATE),
+            incognito = BuildConfig.DEBUG && intent.getBooleanExtra(EXTRA_TEST_INCOGNITO_DOWNLOAD_PAGE, false)
+        )
         localHtmlFile?.let(::loadHtmlDocumentFile)
         if (intent.getBooleanExtra(EXTRA_SHOW_DOWNLOADS, false)) showDownloadsPanel()
         retryCompletedStagingSavesAfterRestore()
@@ -523,6 +529,8 @@ class MainActivity : AppCompatActivity() {
                                                 visualViewportOffsetLeft: Number((window.visualViewport?.offsetLeft || 0).toFixed(2)),
                                                 visualViewportOffsetTop: Number((window.visualViewport?.offsetTop || 0).toFixed(2)),
                                                 documentElementRectWidth: Math.round(document.documentElement?.getBoundingClientRect().width || 0),
+                                                bodyClientWidth: document.body?.clientWidth || 0,
+                                                bodyScrollWidth: document.body?.scrollWidth || 0,
                                                 bodyRectWidth: Math.round(document.body?.getBoundingClientRect().width || 0),
                                                 href: location.href,
                                                 screenHeight: screen.height
@@ -713,8 +721,11 @@ class MainActivity : AppCompatActivity() {
                     callback.cancel()
                     return
                 }
-                val stagingDirectory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
-                    ?: File(filesDir, "downloads")
+                val stagingDirectory = if (window.incognito) {
+                    privateDownloadStagingDirectory()
+                } else {
+                    publicDownloadStagingDirectory()
+                }
                 if (!stagingDirectory.exists() && !stagingDirectory.mkdirs()) {
                     Log.e(TAG, "DOWNLOAD_REQUEST_REJECTED id=$downloadId name=${if (window.incognito) "<private>" else name} reason=staging_directory_unavailable")
                     callback.cancel()
@@ -1664,8 +1675,11 @@ class MainActivity : AppCompatActivity() {
         if (target.incognito && browserWindows.none { it.incognito }) {
             privateDownloadIds.toList().forEach { id ->
                 if (!activeDownloadItems.containsKey(id) && !pendingPublicSaveIds.contains(id)) {
+                    deletePrivateDownloadStagingFile(id)
                     downloadRecords.remove(id)
                     downloadSuggestedNames.remove(id)
+                    downloadStagingFiles.remove(id)
+                    downloadSpeedTrackers.remove(id)
                     privateDownloadIds.remove(id)
                 }
             }
@@ -1991,9 +2005,11 @@ class MainActivity : AppCompatActivity() {
             paused = false,
             canceled = false,
             interrupted = false,
-            updatedAt = System.currentTimeMillis()
+            updatedAt = System.currentTimeMillis(),
+            privateMode = isPrivateDownload
         )
 
+        record.privateMode = isPrivateDownload
         record.name = downloadSuggestedNames[downloadId] ?: name.ifBlank { record.name }
         record.mimeType = DownloadFileSupport.mimeTypeFor(
             record.name,
@@ -2040,7 +2056,28 @@ class MainActivity : AppCompatActivity() {
         } else if (record.interrupted && !record.complete) {
             downloadStagingFiles.remove(downloadId)
         }
-        if (record.complete && !record.path.startsWith("content://")) {
+        if (record.privateMode) {
+            if (showingDownloads) renderDownloads()
+            if (BuildConfig.DEBUG &&
+                intent.getBooleanExtra(EXTRA_TEST_CLOSE_PRIVATE_AFTER_DOWNLOAD, false) &&
+                record.complete
+            ) {
+                val privateFileExists = DownloadStoragePolicy.isOwnedStagingFile(
+                    downloadId,
+                    record.path,
+                    listOf(privateDownloadStagingDirectory())
+                ) && File(record.path).isFile
+                Log.i(TAG, "TEST_PRIVATE_DOWNLOAD_STAGED id=$downloadId exists=$privateFileExists")
+                val owner = downloadBrowserOwners[downloadId]
+                val privateWindow = browserWindows.firstOrNull { it.browser === owner && it.incognito }
+                if (privateWindow != null) {
+                    Log.i(TAG, "TEST_PRIVATE_DOWNLOAD_CLOSE_REQUESTED id=$downloadId")
+                    browserSlot.post { closeWindow(privateWindow.id) }
+                }
+            }
+            return
+        }
+        if (record.shouldSaveToPublicDownloads()) {
             persistDownloads()
             if (showingDownloads) renderDownloads()
             saveCompletedDownloadToPublicDownloads(record)
@@ -2068,16 +2105,59 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun publicDownloadStagingDirectory(): File =
+        getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: File(filesDir, "downloads")
+
+    private fun privateDownloadStagingDirectory(): File = File(filesDir, "private-downloads")
+
+    private fun stagingDirectoriesForDeletion(): List<File> = listOf(
+        publicDownloadStagingDirectory(),
+        privateDownloadStagingDirectory()
+    )
+
     private fun isOwnedStagingDownload(record: DownloadRecord): Boolean {
-        val path = record.path.takeIf { it.isNotBlank() && !it.startsWith("content://") } ?: return false
-        val file = runCatching { File(path).canonicalFile }.getOrNull() ?: return false
-        val stagingDirectory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
-            ?: File(filesDir, "downloads")
-        return runCatching {
-            file.isFile &&
-                file.name.startsWith("${record.id}-") &&
-                file.parentFile == stagingDirectory.canonicalFile
-        }.getOrDefault(false)
+        val file = record.path.takeIf { it.isNotBlank() && !it.startsWith("content://") }
+            ?.let(::File) ?: return false
+        return file.isFile && DownloadStoragePolicy.isOwnedStagingFile(
+            record.id,
+            record.path,
+            listOf(publicDownloadStagingDirectory())
+        )
+    }
+
+    private fun deletePrivateDownloadStagingFile(downloadId: Int) {
+        val path = downloadRecords[downloadId]?.path
+            ?.takeIf { it.isNotBlank() && !it.startsWith("content://") }
+            ?: downloadStagingFiles[downloadId]?.absolutePath
+            ?: return
+        val directory = privateDownloadStagingDirectory()
+        if (!DownloadStoragePolicy.isOwnedStagingFile(downloadId, path, listOf(directory))) {
+            Log.w(TAG, "Refusing to delete private download outside private staging storage id=$downloadId")
+            return
+        }
+        val file = runCatching { File(path).canonicalFile }.getOrNull() ?: return
+        if (file.exists() && !file.delete()) {
+            Log.w(TAG, "Unable to delete private download staging file id=$downloadId")
+        }
+    }
+
+    private fun cleanupAbandonedPrivateDownloads() {
+        if (DownloadKeepAliveService.isRunning) return
+        val directory = privateDownloadStagingDirectory()
+        if (!directory.exists()) return
+        val root = runCatching { filesDir.canonicalFile }.getOrNull() ?: return
+        val canonicalDirectory = runCatching { directory.canonicalFile }.getOrNull() ?: return
+        if (canonicalDirectory.parentFile != root || canonicalDirectory.name != "private-downloads") {
+            Log.w(TAG, "Refusing to clean an unexpected private download directory")
+            return
+        }
+        canonicalDirectory.listFiles()?.forEach { child ->
+            val canonicalChild = runCatching { child.canonicalFile }.getOrNull()
+            if (canonicalChild?.parentFile == canonicalDirectory && child.isFile && !child.delete()) {
+                Log.w(TAG, "Unable to remove an abandoned private download staging file")
+            }
+        }
+        canonicalDirectory.delete()
     }
 
     private fun retrySaveCompletedDownload(record: DownloadRecord) {
@@ -2097,6 +2177,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun saveCompletedDownloadToPublicDownloads(record: DownloadRecord) {
+        if (record.privateMode) {
+            Log.w(TAG, "Refusing to export a private download id=${record.id}")
+            return
+        }
         if (!pendingPublicSaveIds.add(record.id)) return
         val downloadedFile = record.path.takeIf { it.isNotBlank() }?.let(::File)
         if (downloadedFile == null || !downloadedFile.isFile) {
@@ -2621,10 +2705,11 @@ class MainActivity : AppCompatActivity() {
                 contentResolver.delete(uri, null, null) > 0 || !isDownloadFileAvailable(record)
             } else {
                 val file = File(record.path).canonicalFile
-                val stagingDirectory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
-                    ?: File(filesDir, "downloads")
-                val isOwnedStagingFile = file.parentFile == stagingDirectory.canonicalFile &&
-                    file.name.startsWith("${record.id}-")
+                val isOwnedStagingFile = DownloadStoragePolicy.isOwnedStagingFile(
+                    record.id,
+                    record.path,
+                    stagingDirectoriesForDeletion()
+                )
                 if (!isOwnedStagingFile) {
                     Log.w(TAG, "Refusing to delete download outside app-owned staging storage id=${record.id}")
                     false
@@ -2742,13 +2827,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun deleteCanceledPartialDownload(record: DownloadRecord) {
         val path = record.path.takeIf { it.isNotBlank() && !it.startsWith("content://") } ?: return
-        val partialFile = File(path)
-        if (!partialFile.name.startsWith("${record.id}-")) return
-        val stagingDirectory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
-            ?: File(filesDir, "downloads")
-        val isOwnedStagingFile = runCatching {
-            partialFile.canonicalFile.parentFile == stagingDirectory.canonicalFile
-        }.getOrDefault(false)
+        val isOwnedStagingFile = DownloadStoragePolicy.isOwnedStagingFile(
+            record.id,
+            path,
+            stagingDirectoriesForDeletion()
+        )
+        val partialFile = runCatching { File(path).canonicalFile }.getOrNull() ?: return
         if (isOwnedStagingFile && partialFile.exists() && !partialFile.delete()) {
             Log.w(TAG, "Unable to delete canceled partial download: ${partialFile.absolutePath}")
         }
@@ -2796,7 +2880,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun persistDownloads() {
         val array = JSONArray()
-        downloadRecords.values.filterNot { privateDownloadIds.contains(it.id) }.forEach { record ->
+        downloadRecords.values.filterNot { privateDownloadIds.contains(it.id) || it.privateMode }.forEach { record ->
             array.put(JSONObject().apply {
                 put("id", record.id)
                 put("name", record.name)

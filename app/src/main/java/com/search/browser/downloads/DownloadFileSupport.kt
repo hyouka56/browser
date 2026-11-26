@@ -23,11 +23,11 @@ internal object DownloadFileSupport {
 
     fun isApk(name: String, mimeType: String?): Boolean =
         name.endsWith(".apk", ignoreCase = true) ||
-            mimeType.equals(APK_MIME_TYPE, ignoreCase = true)
+            normalizeMimeType(mimeType).equals(APK_MIME_TYPE, ignoreCase = true)
 
     fun mimeTypeFor(name: String, declaredMimeType: String?): String {
         if (isApk(name, declaredMimeType)) return APK_MIME_TYPE
-        val declared = declaredMimeType?.substringBefore(';')?.trim().orEmpty()
+        val declared = normalizeMimeType(declaredMimeType)
         if (declared.isNotBlank() && !declared.equals(OCTET_STREAM, ignoreCase = true)) {
             return declared
         }
@@ -42,16 +42,22 @@ internal object DownloadFileSupport {
         return cleaned.takeIf { it.isNotBlank() && it != "." && it != ".." }
     }
 
-    private fun extensionForMimeType(mimeType: String?): String? = when {
-        mimeType.equals(APK_MIME_TYPE, true) -> "apk"
-        mimeType.equals("application/pdf", true) -> "pdf"
-        mimeType.equals("text/plain", true) -> "txt"
-        mimeType.equals("text/html", true) -> "html"
-        mimeType.equals("application/zip", true) || mimeType.equals("application/x-zip-compressed", true) -> "zip"
-        mimeType.equals("image/png", true) -> "png"
-        mimeType.equals("image/jpeg", true) -> "jpg"
-        mimeType.equals("application/octet-stream", true) -> "bin"
-        else -> null
+    private fun normalizeMimeType(value: String?): String =
+        value?.substringBefore(';')?.trim().orEmpty()
+
+    private fun extensionForMimeType(mimeType: String?): String? {
+        val normalized = normalizeMimeType(mimeType)
+        return when {
+            normalized.equals(APK_MIME_TYPE, true) -> "apk"
+            normalized.equals("application/pdf", true) -> "pdf"
+            normalized.equals("text/plain", true) -> "txt"
+            normalized.equals("text/html", true) -> "html"
+            normalized.equals("application/zip", true) || normalized.equals("application/x-zip-compressed", true) -> "zip"
+            normalized.equals("image/png", true) -> "png"
+            normalized.equals("image/jpeg", true) -> "jpg"
+            normalized.equals(OCTET_STREAM, true) -> "bin"
+            else -> null
+        }
     }
 
     private fun extensionMimeType(name: String): String? = when (name.substringAfterLast('.', "").lowercase()) {

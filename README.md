@@ -16,12 +16,12 @@ The app creates its browser with the Cefrium surface API. If Cefrium reports tha
 
 The dark browser UI, concise tab labels (up to eight live tabs), address bar, in-app downloads, download pause/resume/cancel actions, and saved download history remain in the app. Website colors are left to each page. Inactive tabs are blurred and paused; only the selected tab keeps active media controls.
 
-Active downloads keep the Cefrium browser process alive through an Android `dataSync` foreground service. Removing Browser from the Recents screen does not close an active download; the service stops after the transfer and its copy into the public Downloads folder finish. Android force-stop, device shutdown, or the operating system terminating the process can still interrupt an in-progress transfer.
+Active downloads keep the Cefrium browser process alive through an Android `dataSync` foreground service. Removing Browser from the Recents screen does not close an active download; the service stops after the transfer and, for normal downloads, its copy into the public Downloads folder finish. Android 15 and later impose an app-level six-hour-per-24-hour time limit on `dataSync` foreground services, so a very long transfer can still be stopped when that budget expires. Android force-stop, device shutdown, or the operating system terminating the process can also interrupt an in-progress transfer. Incognito downloads stay in app-private storage and are removed when the last incognito window closes.
 
 ## Build variants
 
 Every GitHub Actions run builds:
-- `emulatorDebug`: x86_64 Debug APK for the API 30 and API 35 emulator jobs.
+- `emulatorDebug`: x86_64 Debug APK for API 30, API 31, API 35, and API 36 emulator jobs.
 - `phoneDebug`: armeabi-v7a TV Lite Debug APK for 32-bit ARM devices.
 - `arm64Debug`: arm64-v8a Debug APK for 64-bit ARM devices.
 
@@ -29,7 +29,7 @@ The ARM32 TV Lite flavor disables ad blocking and custom page recoloring to redu
 
 ## Emulator verification
 
-The API 30, API 35, and API 36 emulator jobs install the x86_64 Debug APK, load `https://example.com/`, verify the page title and loading callback, and capture a visible surface bitmap. They also exercise the Debug-only renderer-termination recovery path.
+The API 30, API 31, API 35, and API 36 emulator jobs install the x86_64 Debug APK, load `https://example.com/`, verify the page title and loading callback, and capture a visible surface bitmap. They also exercise the Debug-only renderer-termination recovery path.
 
 These emulator jobs do not claim to reproduce an ARM32 TV's memory, GPU driver, or OEM process-management behavior.
 
