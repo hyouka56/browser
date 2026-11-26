@@ -1226,7 +1226,12 @@ if [[ -z "$(adb shell pidof "$PACKAGE" | tr -d '\r')" ]]; then
   exit 1
 fi
 
-adb logcat -d -v threadtime > "$ARTIFACTS/logcat.txt" 2>&1
+# Preserve all evidence through the final report. Do not overwrite the merged
+# pre-clear renderer/download log with only the post-clear background phase.
+{
+  cat "$ARTIFACTS/private-download-final-logcat.txt"
+  adb logcat -d -v threadtime
+} > "$ARTIFACTS/logcat.txt" 2>&1
 test -s "$ARTIFACTS/page-before-renderer-restart.png"
 test -s "$ARTIFACTS/page-after-renderer-recovery.png"
 
