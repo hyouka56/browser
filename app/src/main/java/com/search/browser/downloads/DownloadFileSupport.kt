@@ -37,21 +37,24 @@ internal object DownloadFileSupport {
     private fun sanitize(value: String?): String? {
         val leaf = value.orEmpty().substringAfterLast('/').substringAfterLast('\\')
         val cleaned = leaf.map { character ->
-            if (character.code < 32 || character in "\\/:*?\"<>|") '_' else character
+            if (character.code < 32 || character in "\\\\/:*?\"<>|") '_' else character
         }.joinToString("").trim().trim('.')
         return cleaned.takeIf { it.isNotBlank() && it != "." && it != ".." }
     }
 
-    private fun extensionForMimeType(mimeType: String?): String? = when {
-        mimeType.equals(APK_MIME_TYPE, true) -> "apk"
-        mimeType.equals("application/pdf", true) -> "pdf"
-        mimeType.equals("text/plain", true) -> "txt"
-        mimeType.equals("text/html", true) -> "html"
-        mimeType.equals("application/zip", true) || mimeType.equals("application/x-zip-compressed", true) -> "zip"
-        mimeType.equals("image/png", true) -> "png"
-        mimeType.equals("image/jpeg", true) -> "jpg"
-        mimeType.equals("application/octet-stream", true) -> "bin"
-        else -> null
+    private fun extensionForMimeType(mimeType: String?): String? {
+        val normalized = mimeType?.substringBefore(';')?.trim()
+        return when {
+            normalized.equals(APK_MIME_TYPE, true) -> "apk"
+            normalized.equals("application/pdf", true) -> "pdf"
+            normalized.equals("text/plain", true) -> "txt"
+            normalized.equals("text/html", true) -> "html"
+            normalized.equals("application/zip", true) || normalized.equals("application/x-zip-compressed", true) -> "zip"
+            normalized.equals("image/png", true) -> "png"
+            normalized.equals("image/jpeg", true) -> "jpg"
+            normalized.equals(OCTET_STREAM, true) -> "bin"
+            else -> null
+        }
     }
 
     private fun extensionMimeType(name: String): String? = when (name.substringAfterLast('.', "").lowercase()) {

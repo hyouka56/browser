@@ -20,6 +20,11 @@ class DownloadFileSupportTest {
     }
 
     @Test
+    fun derivesExtensionFromParameterizedMimeType() {
+        assertEquals("notes.txt", DownloadFileSupport.normalizedName("notes", null, "text/plain; charset=utf-8"))
+    }
+
+    @Test
     fun stripsDirectoriesAndUnsafeFilenameCharacters() {
         assertEquals("report_.pdf", DownloadFileSupport.normalizedName("../../report?.pdf", null, null))
     }
