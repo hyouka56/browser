@@ -22,6 +22,7 @@ class DownloadFileSupportTest {
     @Test
     fun derivesExtensionFromParameterizedMimeType() {
         assertEquals("notes.txt", DownloadFileSupport.normalizedName("notes", null, "text/plain; charset=utf-8"))
+        assertEquals("installer.apk", DownloadFileSupport.normalizedName("installer", null, "application/vnd.android.package-archive; charset=binary"))
     }
 
     @Test
@@ -33,6 +34,7 @@ class DownloadFileSupportTest {
     fun recognizesApkByExtensionOrMimeType() {
         assertTrue(DownloadFileSupport.isApk("installer.apk", "application/octet-stream"))
         assertTrue(DownloadFileSupport.isApk("download", "application/vnd.android.package-archive"))
+        assertTrue(DownloadFileSupport.isApk("download", "application/vnd.android.package-archive; charset=binary"))
         assertFalse(DownloadFileSupport.isApk("notes.txt", "text/plain"))
     }
 
