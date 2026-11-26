@@ -166,11 +166,17 @@ jobs:
         uses: reactivecircus/android-emulator-runner@v2.38.0
         with:
           api-level: ${{ matrix.api-level }}
-          target: google_apis
+          # API 35 uses AOSP to isolate the Pixel Launcher ANR; role tests use the platform controller.
+          target: ${{ matrix.api-level == 35 && 'default' || 'google_apis' }}
           arch: x86_64
           profile: pixel_5
           force-avd-creation: true
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-metrics -no-snapshot -camera-back none -camera-front none
+          # API 35's hosted emulator intermittently inherits unusable host DNS servers.
+          # Android documents -dns-server as the workaround for emulator UnknownHost errors.
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+            -no-metrics -no-snapshot -camera-back none -camera-front none
+            ${{ matrix.api-level == 35 && '-dns-server 8.8.8.8,8.8.4.4 -memory 4096' || '' }}
           pre-emulator-launch-script: |
             sudo apt-get install -y libx11-dev libx11-xcb-dev
             mkdir -p "$HOME/.android"
@@ -179,7 +185,7 @@ jobs:
             adb start-server
           disable-animations: true
           script: |
-            bash scripts/run-browser-emulator-test.sh "$RUNNER_TEMP/browser-apk/app-emulator-debug.apk" "${{ matrix.api-level }}"
+            bash scripts/android/run-browser-emulator-test.sh "$RUNNER_TEMP/browser-apk/app-emulator-debug.apk" "${{ matrix.api-level }}"
 
       - name: Upload emulator screenshots, Logcat, and report
         if: always()

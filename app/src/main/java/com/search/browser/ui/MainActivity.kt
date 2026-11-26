@@ -1,5 +1,15 @@
-package com.search.browser
+package com.search.browser.ui
 
+import com.search.browser.BuildConfig
+import com.search.browser.R
+import com.search.browser.browser.BrowserAddressResolver
+import com.search.browser.browser.BrowserWindowLabel
+import com.search.browser.browser.HtmlDocumentSupport
+import com.search.browser.downloads.ApkDownloadArchive
+import com.search.browser.downloads.DownloadFileSupport
+import com.search.browser.downloads.DownloadKeepAliveService
+import com.search.browser.downloads.DownloadRecord
+import com.search.browser.downloads.DownloadSpeedTracker
 import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager

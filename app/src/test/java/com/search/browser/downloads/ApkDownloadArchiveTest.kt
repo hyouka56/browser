@@ -1,4 +1,4 @@
-package com.search.browser
+package com.search.browser.downloads
 
 import java.io.File
 import java.io.FileOutputStream

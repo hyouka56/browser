@@ -1,4 +1,4 @@
-package com.search.browser
+package com.search.browser.browser
 
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets

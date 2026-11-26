@@ -4,7 +4,7 @@ set -Eeuo pipefail
 APK="${1:?Debug APK path is required}"
 EXPECTED_API="${2:?Expected Android API level is required}"
 PACKAGE="com.search.browser"
-ACTIVITY="$PACKAGE/.MainActivity"
+ACTIVITY="$PACKAGE/.ui.MainActivity"
 ARTIFACTS="artifacts/api-$EXPECTED_API"
 mkdir -p "$ARTIFACTS"
 
@@ -22,6 +22,12 @@ collect_evidence() {
   adb shell dumpsys package "$PACKAGE" > "$ARTIFACTS/package-dump.txt" 2>&1 || true
   adb shell dumpsys activity activities > "$ARTIFACTS/activity-dump.txt" 2>&1 || true
   adb shell dumpsys meminfo "$PACKAGE" > "$ARTIFACTS/memory-dump.txt" 2>&1 || true
+  adb shell dumpsys meminfo > "$ARTIFACTS/system-memory-dump.txt" 2>&1 || true
+  adb shell dumpsys meminfo com.google.android.apps.nexuslauncher > "$ARTIFACTS/launcher-memory-dump.txt" 2>&1 || true
+  adb shell dumpsys cpuinfo > "$ARTIFACTS/cpuinfo.txt" 2>&1 || true
+  adb shell dumpsys connectivity > "$ARTIFACTS/connectivity-dump.txt" 2>&1 || true
+  adb shell dumpsys dnsresolver > "$ARTIFACTS/dnsresolver-dump.txt" 2>&1 || true
+  adb shell ip route show > "$ARTIFACTS/ip-routes.txt" 2>&1 || true
 }
 trap collect_evidence EXIT
 
@@ -164,22 +170,26 @@ PY
     return 1
   fi
   adb shell input tap "$x" "$y"
-  echo "PASS: tapped accessibility node $mode='$selector' at $x,$y"
+  echo "ACTION: sent tap to accessibility node $mode='$selector' at $x,$y"
 }
 
 
-dismiss_external_anr_dialog_if_present() {
+tap_external_anr_wait_action() {
   local window_dump
   window_dump="$(adb shell dumpsys window 2>/dev/null || true)"
   if ! grep -F "Application Not Responding" <<< "$window_dump" >/dev/null; then
-    return 0
+    return 2
   fi
 
   local hierarchy="$ARTIFACTS/ui-hierarchy-anr-$RANDOM.xml"
-  adb shell uiautomator dump /sdcard/browser-anr.xml >/dev/null 2>&1 || {
+  if ! adb shell uiautomator dump /sdcard/browser-anr.xml >/dev/null 2>&1; then
+    window_dump="$(adb shell dumpsys window 2>/dev/null || true)"
+    if ! grep -F "Application Not Responding" <<< "$window_dump" >/dev/null; then
+      return 2
+    fi
     echo "Could not inspect the active system ANR dialog." >&2
     return 1
-  }
+  fi
   adb exec-out cat /sdcard/browser-anr.xml > "$hierarchy"
 
   local alert_title
@@ -195,6 +205,10 @@ for node in root.iter("node"):
 raise SystemExit("No system ANR alert title was found")
 PY
   )"; then
+    window_dump="$(adb shell dumpsys window 2>/dev/null || true)"
+    if ! grep -F "Application Not Responding" <<< "$window_dump" >/dev/null; then
+      return 2
+    fi
     echo "The ANR window is present, but its title could not be verified." >&2
     return 1
   fi
@@ -206,19 +220,172 @@ PY
 
   echo "External ANR dialog detected for '$alert_title'; choosing its accessible Wait action."
   if ! tap_accessibility_node text "Wait"; then
+    window_dump="$(adb shell dumpsys window 2>/dev/null || true)"
+    if ! grep -F "Application Not Responding" <<< "$window_dump" >/dev/null; then
+      return 2
+    fi
     echo "The external ANR dialog did not expose a clickable Wait action." >&2
     return 1
   fi
+  return 0
+}
 
-  for attempt in $(seq 1 10); do
-    if ! adb shell dumpsys window 2>/dev/null | grep -F "Application Not Responding" >/dev/null; then
-      echo "PASS: external system ANR dialog dismissed with Wait."
-      return 0
+browser_window_has_focus() {
+  local window_dump="$1"
+  ! grep -F "Application Not Responding" <<< "$window_dump" >/dev/null \
+    && grep -Eq 'mCurrentFocus=.*com[.]search[.]browser|mFocusedApp=.*com[.]search[.]browser' <<< "$window_dump"
+}
+
+wait_for_browser_window_focus() {
+  local timeout_seconds="${1:-15}"
+  local required_samples="${2:-2}"
+  local elapsed=0
+  local stable_samples=0
+  local anr_dismissals=0
+  while (( elapsed < timeout_seconds )); do
+    local window_dump
+    window_dump="$(adb shell dumpsys window 2>/dev/null || true)"
+    if grep -F "Application Not Responding" <<< "$window_dump" >/dev/null; then
+      if (( anr_dismissals >= 3 )); then
+        echo "External system ANR dialog kept recurring after $anr_dismissals recovery attempts." >&2
+        adb shell dumpsys window >&2 || true
+        return 1
+      fi
+      local tap_status=0
+      tap_external_anr_wait_action || tap_status=$?
+      if (( tap_status == 1 )); then
+        echo "Could not safely recover the external system ANR dialog." >&2
+        return 1
+      fi
+      if (( tap_status == 0 )); then
+        anr_dismissals=$((anr_dismissals + 1))
+      fi
+      stable_samples=0
+    elif browser_window_has_focus "$window_dump"; then
+      stable_samples=$((stable_samples + 1))
+      if (( stable_samples >= required_samples )); then
+        return 0
+      fi
+    else
+      stable_samples=0
     fi
     sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  echo "Browser did not hold foreground window focus for $required_samples consecutive samples (external ANR dialogs dismissed: $anr_dismissals)." >&2
+  adb shell dumpsys window >&2 || true
+  return 1
+}
+
+dismiss_external_anr_dialog_if_present() {
+  local window_dump
+  window_dump="$(adb shell dumpsys window 2>/dev/null || true)"
+  if ! grep -F "Application Not Responding" <<< "$window_dump" >/dev/null; then
+    return 0
+  fi
+
+  local tap_status=0
+  tap_external_anr_wait_action || tap_status=$?
+  if (( tap_status == 2 )); then
+    return 0
+  fi
+  if (( tap_status != 0 )); then
+    return 1
+  fi
+
+  # wait_for_browser_window_focus also clears a recurring external ANR overlay,
+  # but only after verifying its title and using the system's Wait action.
+  if ! wait_for_browser_window_focus 20 4; then
+    echo "The external system ANR dialog was dismissed, but Browser did not regain stable window focus." >&2
+    adb shell dumpsys window >&2 || true
+    return 1
+  fi
+  echo "PASS: external system ANR dialog dismissed; Browser foreground remained stable."
+  return 0
+}
+
+accessibility_desc_exists() {
+  local selector="$1"
+  local hierarchy="$ARTIFACTS/ui-hierarchy-state-$RANDOM.xml"
+  adb shell uiautomator dump /sdcard/browser-state.xml >/dev/null 2>&1 || return 1
+  adb exec-out cat /sdcard/browser-state.xml > "$hierarchy" || return 1
+  python3 - "$hierarchy" "$selector" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+root = ET.parse(sys.argv[1]).getroot()
+selector = sys.argv[2]
+for node in root.iter("node"):
+    if node.attrib.get("content-desc", "").startswith(selector) and node.attrib.get("clickable") == "true":
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+# A tap is only considered successful when both the app's transition log and
+# the resulting accessible button state agree. If a system ANR steals the tap,
+# recover the overlay and retry only while the original state is still visible.
+wait_for_desktop_site_transition() {
+  local before_desc="$1"
+  local after_desc="$2"
+  local expected_enabled="$3"
+  local expected_count="$4"
+  local timeout_seconds="${5:-30}"
+  local elapsed=0
+  local retries=0
+
+  if ! dismiss_external_anr_dialog_if_present; then
+    return 1
+  fi
+  if ! wait_for_browser_window_focus 15 2; then
+    return 1
+  fi
+  tap_accessibility_node_with_system_recovery desc "$before_desc" || return 1
+  while (( elapsed < timeout_seconds )); do
+    local matching_count
+    matching_count="$(adb logcat -d -s Browser:V 2>/dev/null | grep -F -c "DESKTOP_SITE_MODE window=1 enabled=$expected_enabled" || true)"
+    if (( matching_count >= expected_count )); then
+      if accessibility_desc_exists "$after_desc"; then
+        echo "PASS: desktop-site transition confirmed by app log and accessibility state: $after_desc"
+        return 0
+      fi
+    fi
+
+    local window_dump
+    window_dump="$(adb shell dumpsys window 2>/dev/null || true)"
+    if grep -F "Application Not Responding" <<< "$window_dump" >/dev/null; then
+      if ! dismiss_external_anr_dialog_if_present; then
+        return 1
+      fi
+    elif ! browser_window_has_focus "$window_dump"; then
+      # Wait for the app to own the input window before considering a retry.
+      if ! wait_for_browser_window_focus 8 2; then
+        return 1
+      fi
+    fi
+
+    # Never repeat a toggle after its app event was logged: that could undo a
+    # successful change. Retry only when the event is absent and the old state
+    # is still visibly present after ANR/focus recovery.
+    if (( matching_count < expected_count && retries < 2 && elapsed >= 4 && elapsed % 4 == 0 )); then
+      if accessibility_desc_exists "$before_desc"; then
+        if ! wait_for_browser_window_focus 8 2; then
+          return 1
+        fi
+        echo "RETRY: desktop-site event not emitted; original control state is still present."
+        if tap_accessibility_node desc "$before_desc"; then
+          retries=$((retries + 1))
+        fi
+      fi
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
   done
 
-  echo "The external system ANR dialog remained after selecting Wait." >&2
+  echo "Timed out waiting for desktop-site transition to '$after_desc' (expected event count: $expected_count; retries: $retries)." >&2
+  adb shell dumpsys window >&2 || true
+  adb logcat -d -s Browser:V >&2 || true
+  adb shell uiautomator dump /sdcard/browser-transition-failure.xml >/dev/null 2>&1 || true
+  adb exec-out cat /sdcard/browser-transition-failure.xml > "$ARTIFACTS/ui-hierarchy-transition-failure.xml" 2>/dev/null || true
   return 1
 }
 
@@ -253,8 +420,7 @@ wait_for_log "PAGE_TITLE window=1 title=Example Domain" 1 120
 wait_for_log "PAGE_LOAD_STATE loading=false" 1 120
 wait_for_log "DESKTOP_SITE_INITIAL_STATE window=1 enabled=false" 1 30
 wait_for_log "MOBILE_USER_AGENT_BASELINE_CAPTURED window=1" 1 30
-tap_accessibility_node_with_system_recovery desc "Show desktop site"
-wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 1 30
+wait_for_desktop_site_transition "Show desktop site" "Desktop site enabled. Tap to use mobile site" true 1 30
 wait_for_log "DESKTOP_PAGE_SCALE_RESET window=1 success=true" 1 30
 wait_for_log "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" 1 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 2 120
@@ -303,8 +469,7 @@ print(f"PASS: desktop page rendered at {width}px; visualViewport={visual}px, pag
 PY
 sleep 1
 adb exec-out screencap -p > "$ARTIFACTS/desktop-site-scaled.png"
-tap_accessibility_node_with_system_recovery desc "Desktop site enabled."
-wait_for_log "DESKTOP_SITE_MODE window=1 enabled=false" 1 30
+wait_for_desktop_site_transition "Desktop site enabled." "Show desktop site" false 1 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 3 120
 wait_for_log "MOBILE_USER_AGENT_OVERRIDE_RESTORED window=1" 1 30
 wait_for_log "MOBILE_VIEWPORT_ZOOM_RESET window=1" 1 30
@@ -353,8 +518,7 @@ fi
 printf 'PASS: Google search page loaded in mobile mode before the PC-mode test; screenshot captured.\n' | tee -a "$ARTIFACTS/desktop-site-results.txt"
 
 # Reproduce the user's exact flow: keep Google open, tap PC, and inspect the actual desktop page.
-tap_accessibility_node_with_system_recovery desc "Show desktop site"
-wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 2 30
+wait_for_desktop_site_transition "Show desktop site" "Desktop site enabled. Tap to use mobile site" true 2 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 5 120
 wait_for_log "DESKTOP_PAGE_SCALE_RESET window=1 success=true" 2 45
 wait_for_log "DESKTOP_VIEWPORT_ZOOM_APPLIED window=1" 2 45
@@ -402,8 +566,7 @@ if [[ ! -s "$ARTIFACTS/google-desktop-search.png" ]] || [[ "$(wc -c < "$ARTIFACT
 fi
 
 # Turn PC mode off on the same Google tab and verify the mobile layout is restored.
-tap_accessibility_node_with_system_recovery desc "Desktop site enabled. Tap to use mobile site"
-wait_for_log "DESKTOP_SITE_MODE window=1 enabled=false" 2 30
+wait_for_desktop_site_transition "Desktop site enabled. Tap to use mobile site" "Show desktop site" false 2 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 6 120
 wait_for_log "MOBILE_USER_AGENT_OVERRIDE_RESTORED window=1" 2 45
 wait_for_log "MOBILE_VIEWPORT_ZOOM_RESET window=1" 2 30
@@ -469,8 +632,7 @@ if ! dismiss_external_anr_dialog_if_present; then
   exit 1
 fi
 adb exec-out screencap -p > "$ARTIFACTS/github-mobile-repository.png"
-tap_accessibility_node_with_system_recovery desc "Show desktop site"
-wait_for_log "DESKTOP_SITE_MODE window=1 enabled=true" 3 30
+wait_for_desktop_site_transition "Show desktop site" "Desktop site enabled. Tap to use mobile site" true 3 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 8 120
 wait_for_log "DESKTOP_DEVICE_METRICS_APPLIED window=1" 3 45
 wait_for_log "DESKTOP_PAGE_SCALE_RESET window=1 success=true" 3 45
@@ -553,8 +715,7 @@ if [[ ! -s "$ARTIFACTS/github-desktop-repository.png" ]] || [[ "$(wc -c < "$ARTI
   exit 1
 fi
 # Restore mobile mode on the GitHub tab as well, and keep the corresponding screenshot.
-tap_accessibility_node_with_system_recovery desc "Desktop site enabled. Tap to use mobile site"
-wait_for_log "DESKTOP_SITE_MODE window=1 enabled=false" 3 30
+wait_for_desktop_site_transition "Desktop site enabled. Tap to use mobile site" "Show desktop site" false 3 30
 wait_for_log "PAGE_LOAD_STATE loading=false" 9 120
 wait_for_log "MOBILE_USER_AGENT_OVERRIDE_RESTORED window=1" 3 45
 wait_for_log "MOBILE_VIEWPORT_ZOOM_RESET window=1" 3 30

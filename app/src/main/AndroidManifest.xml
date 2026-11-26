@@ -16,7 +16,7 @@
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="false">
         <activity
-            android:name=".MainActivity"
+            android:name=".ui.MainActivity"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize"
             android:exported="true"
             android:windowSoftInputMode="adjustResize">
@@ -50,7 +50,7 @@
             </intent-filter>
         </activity>
         <service
-            android:name=".DownloadKeepAliveService"
+            android:name=".downloads.DownloadKeepAliveService"
             android:exported="false"
             android:foregroundServiceType="dataSync"
             android:stopWithTask="false" />
