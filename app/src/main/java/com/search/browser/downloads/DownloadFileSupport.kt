@@ -37,7 +37,7 @@ internal object DownloadFileSupport {
     private fun sanitize(value: String?): String? {
         val leaf = value.orEmpty().substringAfterLast('/').substringAfterLast('\\')
         val cleaned = leaf.map { character ->
-            if (character.code < 32 || character in "\\\\/:*?\"<>|") '_' else character
+            if (character.code < 32 || character in "\\/:*?\"<>|") '_' else character
         }.joinToString("").trim().trim('.')
         return cleaned.takeIf { it.isNotBlank() && it != "." && it != ".." }
     }
