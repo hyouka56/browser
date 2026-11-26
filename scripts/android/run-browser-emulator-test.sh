@@ -1051,7 +1051,21 @@ adb shell am start -W -n "$ACTIVITY" \
   --ez com.search.browser.TEST_CLOSE_PRIVATE_AFTER_DOWNLOAD true \
   2>&1 | tee "$ARTIFACTS/private-download-test-launch.txt"
 wait_for_log "CEF_BROWSER_CREATED url=<private> incognito=true" 1 60
+# The private browser-created event precedes page navigation and document-start
+# JavaScript. Incognito titles are redacted, so wait for both the initial page
+# title and the test fixture's title change before tapping its download button.
+wait_for_log "PAGE_TITLE window=1 title=<private>" 2 60
 wait_for_log "DOWNLOAD_HANDLER_REGISTERED" 2 30
+if ! dismiss_external_anr_dialog_if_present; then
+  echo "Could not safely dismiss an external system ANR before the private download tap." >&2
+  exit 1
+fi
+if ! wait_for_browser_window_focus 15 2; then
+  echo "Browser did not regain stable window focus before the private download tap." >&2
+  exit 1
+fi
+adb exec-out screencap -p > "$ARTIFACTS/private-download-before-tap.png"
+sleep 1
 adb shell input tap 540 600
 wait_for_log "DOWNLOAD_REQUEST_ACCEPTED name=Private download" 1 60
 PRIVATE_DOWNLOAD_ID="$(adb logcat -d -s Browser:V 2>/dev/null | sed -nE 's/.*DOWNLOAD_REQUEST_ACCEPTED name=Private download id=([0-9]+).*/\1/p' | tail -n1)"
